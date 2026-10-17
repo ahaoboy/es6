@@ -152,9 +152,7 @@ fn property_is_enumerable(
         .map(|property| property.enumerable)
         .unwrap_or_else(|| {
             if let crate::object::ObjectKind::Array(array) = &data.kind {
-                key.as_str()
-                    .and_then(crate::object::key_to_index)
-                    .is_some_and(|index| index < array.length)
+                key.index().is_some_and(|index| index < array.length)
             } else {
                 false
             }
@@ -192,7 +190,7 @@ fn keys(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<J
         .borrow()
         .enumerable_keys()
         .into_iter()
-        .filter_map(|key| key.as_str().map(|value| JsValue::string(value.to_owned())))
+        .filter_map(|key| key.to_rc_string().map(JsValue::String))
         .collect();
     Ok(JsValue::Object(realm.array(keys)))
 }
@@ -216,7 +214,7 @@ fn entries(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResul
     for key in keys {
         let value = crate::vm::get_value_property(realm, &source, &key)?;
         let entry = realm.array(vec![
-            JsValue::string(key.as_str().unwrap_or_default().to_owned()),
+            JsValue::String(key.to_rc_string().unwrap_or_else(|| Rc::from(""))),
             value,
         ]);
         result.push(JsValue::Object(entry));
@@ -448,7 +446,7 @@ fn get_own_property_descriptors(
             &JsValue::Undefined,
             &[
                 JsValue::Object(object.to_ref()),
-                JsValue::string(key.as_str().unwrap_or_default().to_owned()),
+                JsValue::String(key.to_rc_string().unwrap_or_else(|| Rc::from(""))),
             ],
         )? {
             result
@@ -470,7 +468,7 @@ fn get_own_property_names(
         .borrow()
         .own_keys()
         .into_iter()
-        .filter_map(|key| key.as_str().map(|value| JsValue::string(value.to_owned())))
+        .filter_map(|key| key.to_rc_string().map(JsValue::String))
         .collect();
     Ok(JsValue::Object(realm.array(keys)))
 }
@@ -488,7 +486,7 @@ fn get_own_property_symbols(
         .into_iter()
         .filter_map(|key| match key {
             PropKey::Symbol(id) => Some(JsValue::Symbol(id)),
-            PropKey::Str(_) => None,
+            PropKey::Str(_) | PropKey::Index(_) => None,
         })
         .collect();
     Ok(JsValue::Object(realm.array(symbols)))

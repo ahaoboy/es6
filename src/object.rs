@@ -3,6 +3,9 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use indexmap::IndexMap;
+use rustc_hash::FxBuildHasher;
+
+pub type PropertyMap = IndexMap<PropKey, Property, FxBuildHasher>;
 
 use crate::bytecode::FunctionDef;
 use crate::runtime::Realm;
@@ -14,6 +17,7 @@ pub type NativeFn = fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue>;
 #[derive(Clone, Debug)]
 pub enum PropKey {
     Str(Rc<str>),
+    Index(usize),
     Symbol(u32),
 }
 
@@ -39,7 +43,33 @@ impl PropKey {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Str(value) => Some(value),
+            Self::Index(_) | Self::Symbol(_) => None,
+        }
+    }
+
+    pub fn index(&self) -> Option<usize> {
+        match self {
+            Self::Index(index) => Some(*index),
+            Self::Str(value) => key_to_index(value),
             Self::Symbol(_) => None,
+        }
+    }
+
+    pub fn to_rc_string(&self) -> Option<Rc<str>> {
+        match self {
+            Self::Str(value) => Some(value.clone()),
+            Self::Index(index) => Some(Rc::from(index.to_string())),
+            Self::Symbol(_) => None,
+        }
+    }
+
+    fn canonical(&self) -> PropKey {
+        match self {
+            Self::Index(index) => Self::Index(*index),
+            Self::Str(value) => key_to_index(value)
+                .map(Self::Index)
+                .unwrap_or_else(|| Self::Str(value.clone())),
+            Self::Symbol(value) => Self::Symbol(*value),
         }
     }
 }
@@ -347,7 +377,7 @@ pub struct PromiseData {
 /// area): shape/properties, prototype and an optional exotic payload. The
 /// insertion-ordered map is the safe Rust stand-in for `JSShape`.
 pub struct ObjectData {
-    pub props: IndexMap<PropKey, Property>,
+    pub props: PropertyMap,
     pub prototype: Option<ObjRef>,
     pub kind: ObjectKind,
     pub extensible: bool,
@@ -357,7 +387,7 @@ pub struct ObjectData {
 impl ObjectData {
     pub fn ordinary(prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::Ordinary,
             extensible: true,
@@ -368,7 +398,7 @@ impl ObjectData {
     pub fn array(prototype: Option<ObjRef>, items: Vec<JsValue>) -> Self {
         let length = items.len();
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::Array(ArrayData { items, length }),
             extensible: true,
@@ -382,7 +412,7 @@ impl ObjectData {
 
     pub fn new_function(function: Rc<JsFunction>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype: None,
             kind: ObjectKind::Function(function),
             extensible: true,
@@ -392,7 +422,7 @@ impl ObjectData {
 
     pub fn boxed_string(value: Rc<str>, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::BoxedString(value),
             extensible: true,
@@ -402,7 +432,7 @@ impl ObjectData {
 
     pub fn boxed_number(value: f64, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::BoxedNumber(value),
             extensible: true,
@@ -412,7 +442,7 @@ impl ObjectData {
 
     pub fn boxed_bool(value: bool, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::BoxedBool(value),
             extensible: true,
@@ -422,7 +452,7 @@ impl ObjectData {
 
     pub fn map(prototype: Option<ObjRef>, entries: Vec<(JsValue, JsValue)>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::Map(entries),
             extensible: true,
@@ -432,7 +462,7 @@ impl ObjectData {
 
     pub fn promise(prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::Promise(PromiseData {
                 state: PromiseState::Pending,
@@ -445,7 +475,7 @@ impl ObjectData {
 
     pub fn set(prototype: Option<ObjRef>, values: Vec<JsValue>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::Set(values),
             extensible: true,
@@ -455,7 +485,7 @@ impl ObjectData {
 
     pub fn error(prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::Error,
             extensible: true,
@@ -465,7 +495,7 @@ impl ObjectData {
 
     pub fn array_buffer(bytes: ByteBuffer, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::ArrayBuffer(ArrayBufferData { bytes }),
             extensible: true,
@@ -481,7 +511,7 @@ impl ObjectData {
         prototype: Option<ObjRef>,
     ) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::DataView(DataViewData {
                 buffer,
@@ -497,7 +527,7 @@ impl ObjectData {
     pub fn typed_array(data: TypedArrayData, prototype: Option<ObjRef>) -> Self {
         let class_name = data.kind.name();
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::TypedArray(data),
             extensible: true,
@@ -507,7 +537,7 @@ impl ObjectData {
 
     pub fn date(value: f64, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::Date(value),
             extensible: true,
@@ -517,7 +547,7 @@ impl ObjectData {
 
     pub fn regexp(data: Rc<RegExpData>, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: IndexMap::new(),
+            props: PropertyMap::default(),
             prototype,
             kind: ObjectKind::RegExp(data),
             extensible: true,
@@ -559,7 +589,7 @@ impl ObjectData {
     }
 
     pub fn define(&mut self, key: impl Into<PropKey>, property: Property) {
-        self.props.insert(key.into(), property);
+        self.props.insert(key.into().canonical(), property);
     }
 
     pub fn define_value(&mut self, key: impl Into<PropKey>, value: JsValue) {
@@ -567,14 +597,14 @@ impl ObjectData {
     }
 
     pub fn get_own(&self, key: &PropKey) -> Option<&Property> {
-        self.props.get(key)
+        self.props.get(&key.canonical())
     }
 
     pub fn has_own(&self, key: &PropKey) -> bool {
         if self.has_array_key(key) {
             return true;
         }
-        self.props.contains_key(key)
+        self.props.contains_key(&key.canonical())
     }
 
     pub fn has_property(&self, key: &PropKey) -> bool {
@@ -588,24 +618,24 @@ impl ObjectData {
     }
 
     fn has_array_key(&self, key: &PropKey) -> bool {
-        match (&self.kind, key) {
-            (ObjectKind::Array(data), PropKey::Str(text)) => {
-                if text.as_ref() == "length" {
+        match &self.kind {
+            ObjectKind::Array(data) => {
+                if matches!(key, PropKey::Str(text) if text.as_ref() == "length") {
                     return true;
                 }
-                key_to_index(text).is_some_and(|index| index < data.length)
+                key.index().is_some_and(|index| index < data.length)
             }
-            (ObjectKind::BoxedString(value), PropKey::Str(text)) => {
-                if text.as_ref() == "length" {
+            ObjectKind::BoxedString(value) => {
+                if matches!(key, PropKey::Str(text) if text.as_ref() == "length") {
                     return true;
                 }
-                key_to_index(text).is_some_and(|index| index < utf16_len(value))
+                key.index().is_some_and(|index| index < utf16_len(value))
             }
-            (ObjectKind::TypedArray(value), PropKey::Str(text)) => {
-                matches!(
+            ObjectKind::TypedArray(value) => {
+                matches!(key, PropKey::Str(text) if matches!(
                     text.as_ref(),
                     "length" | "byteLength" | "byteOffset" | "buffer"
-                ) || key_to_index(text).is_some_and(|index| index < value.length)
+                )) || key.index().is_some_and(|index| index < value.length)
             }
             _ => false,
         }
@@ -615,7 +645,7 @@ impl ObjectData {
         if let Some(value) = self.get_array_value(key) {
             return Some(value);
         }
-        self.props.get(key).map(|property| {
+        self.props.get(&key.canonical()).map(|property| {
             if property.is_accessor() {
                 JsValue::Undefined
             } else {
@@ -625,30 +655,34 @@ impl ObjectData {
     }
 
     fn get_array_value(&self, key: &PropKey) -> Option<JsValue> {
-        match (&self.kind, key) {
-            (ObjectKind::Array(data), PropKey::Str(text)) => {
-                if text.as_ref() == "length" {
+        match &self.kind {
+            ObjectKind::Array(data) => {
+                if matches!(key, PropKey::Str(text) if text.as_ref() == "length") {
                     return Some(JsValue::number(data.length as f64));
                 }
-                key_to_index(text)
+                key.index()
                     .filter(|index| *index < data.length)
                     .map(|index| data.items[index].clone())
             }
-            (ObjectKind::BoxedString(value), PropKey::Str(text)) => {
-                if text.as_ref() == "length" {
+            ObjectKind::BoxedString(value) => {
+                if matches!(key, PropKey::Str(text) if text.as_ref() == "length") {
                     return Some(JsValue::number(utf16_len(value) as f64));
                 }
-                key_to_index(text)
+                key.index()
                     .filter(|index| *index < utf16_len(value))
                     .and_then(|index| utf16_char(value, index))
                     .map(JsValue::string)
             }
-            (ObjectKind::TypedArray(value), PropKey::Str(text)) => match text.as_ref() {
-                "length" => Some(JsValue::number(value.length as f64)),
-                "byteLength" => Some(JsValue::number(value.byte_length() as f64)),
-                "byteOffset" => Some(JsValue::number(value.byte_offset as f64)),
-                "buffer" => Some(JsValue::Object(value.buffer.clone())),
-                _ => key_to_index(text).map(|index| value.get(index)),
+            ObjectKind::TypedArray(value) => match key {
+                PropKey::Str(text) => match text.as_ref() {
+                    "length" => Some(JsValue::number(value.length as f64)),
+                    "byteLength" => Some(JsValue::number(value.byte_length() as f64)),
+                    "byteOffset" => Some(JsValue::number(value.byte_offset as f64)),
+                    "buffer" => Some(JsValue::Object(value.buffer.clone())),
+                    _ => None,
+                },
+                PropKey::Index(index) => Some(value.get(*index)),
+                PropKey::Symbol(_) => None,
             },
             _ => None,
         }
@@ -665,7 +699,7 @@ impl ObjectData {
                 own: true,
             };
         }
-        if let Some(property) = self.props.get(key) {
+        if let Some(property) = self.props.get(&key.canonical()) {
             if property.is_accessor() {
                 return ResolvedProperty::Accessor {
                     get: property.get.clone(),
@@ -713,7 +747,7 @@ impl ObjectData {
         if let Some(value) = self.get_array_value(key) {
             return Ok(value);
         }
-        if let Some(property) = self.props.get(key) {
+        if let Some(property) = self.props.get(&key.canonical()) {
             if property.is_accessor() {
                 return match &property.get {
                     Some(getter) => {
@@ -740,7 +774,7 @@ impl ObjectData {
         if let Some(result) = self.put_array_value(realm, &key, &value)? {
             return Ok(result);
         }
-        if let Some(property) = self.props.get(&key) {
+        if let Some(property) = self.props.get(&key.canonical()) {
             if property.is_accessor() {
                 return match &property.set {
                     Some(setter) => {
@@ -753,7 +787,7 @@ impl ObjectData {
             if !property.writable {
                 return Ok(());
             }
-            if let Some(property) = self.props.get_mut(&key) {
+            if let Some(property) = self.props.get_mut(&key.canonical()) {
                 property.value = value;
             }
             return Ok(());
@@ -762,7 +796,7 @@ impl ObjectData {
             let mut current = Some(proto.clone());
             while let Some(proto) = current {
                 let cursor = proto.borrow();
-                if let Some(property) = cursor.props.get(&key) {
+                if let Some(property) = cursor.props.get(&key.canonical()) {
                     if property.is_accessor() {
                         return match &property.set {
                             Some(setter) => {
@@ -786,7 +820,7 @@ impl ObjectData {
             }
         }
         if self.extensible {
-            self.props.insert(key, Property::data(value));
+            self.props.insert(key.canonical(), Property::data(value));
         }
         Ok(())
     }
@@ -797,6 +831,27 @@ impl ObjectData {
         key: &PropKey,
         value: &JsValue,
     ) -> JsResult<Option<()>> {
+        if let PropKey::Index(index) = key {
+            match &self.kind {
+                ObjectKind::TypedArray(data) => {
+                    data.set(*index, value);
+                    return Ok(Some(()));
+                }
+                ObjectKind::Array(_data) => {
+                    let index = *index;
+                    if let ObjectKind::Array(data) = &mut self.kind {
+                        if index >= data.items.len() {
+                            data.items.resize(index + 1, JsValue::Undefined);
+                        }
+                        data.items[index] = value.clone();
+                        data.length = data.length.max(index + 1);
+                    }
+                    return Ok(Some(()));
+                }
+                _ => {}
+            }
+            return Ok(None);
+        }
         let PropKey::Str(text) = key else {
             return Ok(None);
         };
@@ -835,29 +890,27 @@ impl ObjectData {
     }
 
     pub fn delete_property(&mut self, key: &PropKey) -> bool {
-        if let ObjectKind::Array(data) = &mut self.kind
-            && let PropKey::Str(text) = key
-        {
-            if text.as_ref() == "length" {
-                return false;
-            }
-            if let Some(index) = key_to_index(text)
+        if let ObjectKind::Array(data) = &mut self.kind {
+            if let Some(index) = key.index()
                 && index < data.items.len()
             {
                 data.items[index] = JsValue::Undefined;
                 return true;
             }
+            if matches!(key, PropKey::Str(text) if text.as_ref() == "length") {
+                return false;
+            }
         }
-        self.props.shift_remove(key).is_some()
+        self.props.shift_remove(&key.canonical()).is_some()
     }
 
     pub fn own_keys(&self) -> Vec<PropKey> {
         let mut keys = Vec::new();
         if let ObjectKind::Array(data) = &self.kind {
-            keys.extend((0..data.length).map(|index| PropKey::Str(Rc::from(index.to_string()))));
+            keys.extend((0..data.length).map(PropKey::Index));
         }
         if let ObjectKind::TypedArray(data) = &self.kind {
-            keys.extend((0..data.length).map(|index| PropKey::Str(Rc::from(index.to_string()))));
+            keys.extend((0..data.length).map(PropKey::Index));
         }
         keys.extend(self.props.keys().cloned());
         keys
@@ -866,10 +919,10 @@ impl ObjectData {
     pub fn enumerable_keys(&self) -> Vec<PropKey> {
         let mut keys = Vec::new();
         if let ObjectKind::Array(data) = &self.kind {
-            keys.extend((0..data.length).map(|index| PropKey::Str(Rc::from(index.to_string()))));
+            keys.extend((0..data.length).map(PropKey::Index));
         }
         if let ObjectKind::TypedArray(data) = &self.kind {
-            keys.extend((0..data.length).map(|index| PropKey::Str(Rc::from(index.to_string()))));
+            keys.extend((0..data.length).map(PropKey::Index));
         }
         keys.extend(
             self.props
@@ -935,7 +988,7 @@ impl Object {
         let value = value.into();
         let mut object = self.inner.borrow_mut();
         if let ObjectKind::Array(data) = &mut object.kind
-            && let Some(index) = key.as_str().and_then(key_to_index)
+            && let Some(index) = key.index()
         {
             if index >= data.items.len() {
                 data.items.resize(index + 1, JsValue::Undefined);
@@ -944,14 +997,14 @@ impl Object {
             data.length = data.length.max(index + 1);
             return;
         }
-        object.props.insert(key, Property::data(value));
+        object.props.insert(key.canonical(), Property::data(value));
     }
 
     pub fn set_key(&self, key: PropKey, value: JsValue) {
         self.inner
             .borrow_mut()
             .props
-            .insert(key, Property::data(value));
+            .insert(key.canonical(), Property::data(value));
     }
 
     pub fn define(&self, key: &str, property: Property) {
@@ -975,7 +1028,7 @@ impl Object {
             .borrow()
             .own_keys()
             .into_iter()
-            .filter_map(|key| key.as_str().map(str::to_owned))
+            .filter_map(|key| key.to_rc_string().map(|value| value.to_string()))
             .collect()
     }
 
@@ -984,7 +1037,7 @@ impl Object {
             .borrow()
             .enumerable_keys()
             .into_iter()
-            .filter_map(|key| key.as_str().map(str::to_owned))
+            .filter_map(|key| key.to_rc_string().map(|value| value.to_string()))
             .collect()
     }
 
@@ -1150,6 +1203,12 @@ pub fn would_create_cycle(object: &ObjRef, prototype: &ObjRef) -> bool {
     false
 }
 
+pub fn key_from_string(value: Rc<str>) -> PropKey {
+    key_to_index(&value)
+        .map(PropKey::Index)
+        .unwrap_or(PropKey::Str(value))
+}
+
 pub fn key_to_index(key: &str) -> Option<usize> {
     if key.is_empty() || key.len() > 10 || !key.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -1177,6 +1236,7 @@ impl PartialEq for PropKey {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Str(a), Self::Str(b)) => a == b,
+            (Self::Index(a), Self::Index(b)) => a == b,
             (Self::Symbol(a), Self::Symbol(b)) => a == b,
             _ => false,
         }
@@ -1189,6 +1249,7 @@ impl Hash for PropKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Self::Str(value) => value.hash(state),
+            Self::Index(value) => value.hash(state),
             Self::Symbol(value) => value.hash(state),
         }
     }

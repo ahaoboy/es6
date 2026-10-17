@@ -38,6 +38,37 @@ thread_local! {
     /// Byte offset of the innermost uncaught VM exception. The VM keeps this
     /// out of `JsValue` so thrown values remain ordinary JavaScript values.
     static ERROR_OFFSET: Cell<Option<usize>> = const { Cell::new(None) };
+    static CALL_STACK: RefCell<Vec<Rc<str>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn stack_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ES6_TRACE_STACK").is_some())
+}
+
+fn record_error_stack(exception: &JsValue) {
+    if !stack_trace_enabled() {
+        return;
+    }
+    let JsValue::Object(object) = exception else {
+        return;
+    };
+    if object.borrow().has_own(&PropKey::from("stack")) {
+        return;
+    }
+    let stack = CALL_STACK.with(|frames| {
+        let frames = frames.borrow();
+        let mut text = String::from("Error stack:\n");
+        for name in frames.iter().rev() {
+            text.push_str("  at ");
+            text.push_str(name);
+            text.push('\n');
+        }
+        text
+    });
+    object
+        .borrow_mut()
+        .define("stack", Property::hidden(JsValue::string(stack)));
 }
 
 pub fn take_error_offset() -> Option<usize> {
@@ -80,13 +111,14 @@ fn run_frame(
         if frame.pc >= definition.code.len() {
             return Ok(JsValue::Undefined);
         }
-        let op = definition.code[frame.pc].clone();
+        let op = definition.code[frame.pc];
         frame.pc += 1;
         let result = execute_op(realm, &mut frame, op);
         match result {
             Ok(Step::Continue) => {}
             Ok(Step::Return(value)) => return Ok(value),
             Err(exception) => {
+                record_error_stack(&exception);
                 if let Some(handler) = frame.handlers.pop() {
                     ERROR_OFFSET.with(|offset| offset.set(None));
                     frame.handlers.truncate(handler.index);
@@ -175,18 +207,20 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             let value = pop(&mut frame.stack)?;
             frame.env.set(depth as usize, slot as usize, value);
         }
-        Op::GetGlobal(name) => {
-            let value = global_get(realm, &name);
-            match value {
+        Op::GetGlobal(index) => {
+            let name = constant_string(frame.definition, index);
+            match global_get(realm, &name) {
                 Some(value) => frame.stack.push(value),
                 None => return Err(realm.reference_error(format!("{name} is not defined"))),
             }
         }
-        Op::SetGlobal(name) => {
+        Op::SetGlobal(index) => {
             let value = pop(&mut frame.stack)?;
+            let name = constant_string(frame.definition, index);
             Object::from_ref(realm.global.clone()).set_key(PropKey::Str(name), value);
         }
-        Op::DeleteGlobal(name) => {
+        Op::DeleteGlobal(index) => {
+            let name = constant_string(frame.definition, index);
             let deleted = Object::from_ref(realm.global.clone()).delete(&name);
             frame.stack.push(JsValue::Bool(deleted));
         }
@@ -304,14 +338,15 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             frame.stack.push(value);
             frame.stack.push(JsValue::Object(realm.array(rest)));
         }
-        Op::ObjectRest(excluded) => {
+        Op::ObjectRest(index) => {
+            let excluded = constant_strings(frame.definition, index);
             let value = pop(&mut frame.stack)?;
             let rest = realm.object();
             if let JsValue::Object(source) = &value {
                 let keys = source.borrow().enumerable_keys();
                 for key in keys {
-                    if let Some(name) = key.as_str()
-                        && excluded.iter().any(|excluded| excluded.as_ref() == name)
+                    if let Some(name) = key.to_rc_string()
+                        && excluded.iter().any(|excluded| excluded.as_ref() == name.as_ref())
                     {
                         continue;
                     }
@@ -443,7 +478,8 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         Op::UShr => {
             let right = pop(&mut frame.stack)?;
             let left = pop(&mut frame.stack)?;
-            let value = to_uint32(to_number(left)?) >> (to_uint32(to_number(right)?) & 31);
+            let value =
+                to_uint32(to_numeric(realm, left)?) >> (to_uint32(to_numeric(realm, right)?) & 31);
             frame.stack.push(JsValue::number(value as f64));
         }
         Op::Eq => {
@@ -500,21 +536,26 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         }
         Op::Neg => {
             let value = pop(&mut frame.stack)?;
-            frame.stack.push(JsValue::number(-to_number(value)?));
+            frame
+                .stack
+                .push(JsValue::number(-to_numeric(realm, value)?));
         }
         Op::Pos => {
             let value = pop(&mut frame.stack)?;
-            frame.stack.push(JsValue::number(to_number(value)?));
+            frame.stack.push(JsValue::number(to_numeric(realm, value)?));
         }
         Op::BitNot => {
             let value = pop(&mut frame.stack)?;
-            frame.stack.push(JsValue::Int(!to_int32(to_number(value)?)));
+            frame
+                .stack
+                .push(JsValue::Int(!to_int32(to_numeric(realm, value)?)));
         }
         Op::TypeOf => {
             let value = pop(&mut frame.stack)?;
             frame.stack.push(JsValue::string(value.type_of()));
         }
-        Op::TypeOfGlobal(name) => {
+        Op::TypeOfGlobal(index) => {
+            let name = constant_string(frame.definition, index);
             let value = global_get(realm, &name);
             frame.stack.push(JsValue::string(match value {
                 Some(value) => value.type_of(),
@@ -554,9 +595,8 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             slot,
             prefix,
         } => {
-            let _ = &op;
             let old = frame.env.get(depth as usize, slot as usize);
-            let number = to_number(old)?;
+            let number = to_numeric(realm, old)?;
             let new = JsValue::number(number + 1.0);
             frame.env.set(depth as usize, slot as usize, new.clone());
             frame
@@ -569,25 +609,27 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             prefix,
         } => {
             let old = frame.env.get(depth as usize, slot as usize);
-            let number = to_number(old)?;
+            let number = to_numeric(realm, old)?;
             let new = JsValue::number(number - 1.0);
             frame.env.set(depth as usize, slot as usize, new.clone());
             frame
                 .stack
                 .push(if prefix { new } else { JsValue::number(number) });
         }
-        Op::IncGlobal(name, prefix) => {
+        Op::IncGlobal(index, prefix) => {
+            let name = constant_string(frame.definition, index);
             let old = global_get(realm, &name).unwrap_or(JsValue::Undefined);
-            let number = to_number(old)?;
+            let number = to_numeric(realm, old)?;
             let new = JsValue::number(number + 1.0);
             Object::from_ref(realm.global.clone()).set_key(PropKey::Str(name), new.clone());
             frame
                 .stack
                 .push(if prefix { new } else { JsValue::number(number) });
         }
-        Op::DecGlobal(name, prefix) => {
+        Op::DecGlobal(index, prefix) => {
+            let name = constant_string(frame.definition, index);
             let old = global_get(realm, &name).unwrap_or(JsValue::Undefined);
-            let number = to_number(old)?;
+            let number = to_numeric(realm, old)?;
             let new = JsValue::number(number - 1.0);
             Object::from_ref(realm.global.clone()).set_key(PropKey::Str(name), new.clone());
             frame
@@ -598,7 +640,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             let key = pop_property_key(realm, &mut frame.stack)?;
             let object = pop(&mut frame.stack)?;
             let old = get_value_property(realm, &object, &key)?;
-            let number = to_number(old)?;
+            let number = to_numeric(realm, old)?;
             let new = JsValue::number(number + delta);
             set_value_property(realm, &object, &key, new.clone(), true)?;
             frame
@@ -647,8 +689,8 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             if let JsValue::Object(object) = &value {
                 let enumerable = object.borrow().enumerable_keys();
                 for key in enumerable {
-                    if let Some(text) = key.as_str() {
-                        keys.push(JsValue::string(text.to_owned()));
+                    if let Some(text) = key.to_rc_string() {
+                        keys.push(JsValue::String(text));
                     }
                 }
             }
@@ -753,9 +795,8 @@ fn binary_number(
 ) -> JsResult<()> {
     let right = pop(&mut frame.stack)?;
     let left = pop(&mut frame.stack)?;
-    let value = operation(to_number(left)?, to_number(right)?);
+    let value = operation(to_numeric(realm, left)?, to_numeric(realm, right)?);
     frame.stack.push(JsValue::number(value));
-    let _ = realm;
     Ok(())
 }
 
@@ -766,9 +807,11 @@ fn binary_int(
 ) -> JsResult<()> {
     let right = pop(&mut frame.stack)?;
     let left = pop(&mut frame.stack)?;
-    let value = operation(to_int32(to_number(left)?), to_int32(to_number(right)?));
+    let value = operation(
+        to_int32(to_numeric(realm, left)?),
+        to_int32(to_numeric(realm, right)?),
+    );
     frame.stack.push(JsValue::Int(value));
-    let _ = realm;
     Ok(())
 }
 
@@ -819,6 +862,20 @@ fn pop_array(stack: &mut Vec<JsValue>) -> JsResult<Vec<JsValue>> {
     }
 }
 
+fn constant_string(definition: &FunctionDef, index: u32) -> Rc<str> {
+    match definition.constants.get(index as usize) {
+        Some(Constant::String(value)) => value.clone(),
+        _ => Rc::from(""),
+    }
+}
+
+fn constant_strings(definition: &FunctionDef, index: u32) -> Rc<[Rc<str>]> {
+    match definition.constants.get(index as usize) {
+        Some(Constant::Strings(value)) => value.clone(),
+        _ => Rc::from([]),
+    }
+}
+
 fn property_key_from_constant(definition: &FunctionDef, index: u32) -> JsResult<PropKey> {
     match definition.constants.get(index as usize) {
         Some(Constant::String(value)) => Ok(PropKey::Str(value.clone())),
@@ -843,6 +900,9 @@ fn constant_value(
             let value = create_class(realm, class, env, JsValue::Undefined)?;
             Ok(value)
         }
+        Some(Constant::Strings(_)) => Err(JsValue::string(
+            "InternalError: invalid string-array constant",
+        )),
         Some(Constant::Regex { source, flags }) => {
             let regex =
                 regress::Regex::with_flags(source.as_ref(), flags.as_ref()).map_err(|error| {
@@ -995,6 +1055,10 @@ pub fn call_value(
     if definition.name.as_ref() == "<class_fields>" {
         copy_this_fields(&this, &env, definition.env_size as usize);
     }
+    let trace = stack_trace_enabled();
+    if trace {
+        CALL_STACK.with(|stack| stack.borrow_mut().push(definition.name.clone()));
+    }
     let this = if definition.is_arrow {
         function.lexical_this.clone().unwrap_or(JsValue::Undefined)
     } else if this.is_nullish() && !definition.strict {
@@ -1010,6 +1074,11 @@ pub fn call_value(
         Some(callee),
         arguments.to_vec(),
     );
+    if trace {
+        CALL_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
     if definition.is_async {
         let promise = realm.promise();
         if let ObjectKind::Promise(data) = &mut promise.borrow_mut().kind {
@@ -1189,17 +1258,18 @@ pub fn set_value_property(
                     ..
                 } => {
                     if writable {
-                        object
-                            .borrow_mut()
-                            .define(key.clone(), Property::data(new_value));
+                        let mut data = object.borrow_mut();
+                        if data.put_array_value(realm, key, &new_value)?.is_none() {
+                            data.define(key.clone(), Property::data(new_value));
+                        }
                     }
                     Ok(())
                 }
                 crate::object::ResolvedProperty::Missing => {
-                    if object.borrow().extensible {
-                        object
-                            .borrow_mut()
-                            .define(key.clone(), Property::data(new_value));
+                    let mut data = object.borrow_mut();
+                    if data.put_array_value(realm, key, &new_value)?.is_none() && data.extensible
+                    {
+                        data.define(key.clone(), Property::data(new_value));
                     }
                     Ok(())
                 }
@@ -1218,6 +1288,7 @@ pub fn set_value_property(
 fn display_key(key: &PropKey) -> String {
     match key {
         PropKey::Str(value) => value.to_string(),
+        PropKey::Index(value) => value.to_string(),
         PropKey::Symbol(value) => format!("Symbol({value})"),
     }
 }
@@ -1242,6 +1313,14 @@ pub fn to_boolean(value: &JsValue) -> bool {
         JsValue::Symbol(_) => true,
         JsValue::Object(_) => true,
     }
+}
+
+/// ECMAScript `ToNumeric` for arithmetic operators: objects are first
+/// converted with `ToPrimitive` (hint number). QuickJS performs the same
+/// two-stage conversion in `JS_ToNumberHintFree`/`js_unary_arith_slow`.
+pub fn to_numeric(realm: &mut Realm, value: JsValue) -> JsResult<f64> {
+    let value = to_primitive(realm, value)?;
+    to_number(value)
 }
 
 pub fn to_number(value: JsValue) -> JsResult<f64> {
@@ -1442,8 +1521,11 @@ pub fn pop_property_key(realm: &mut Realm, stack: &mut Vec<JsValue>) -> JsResult
 
 pub fn to_property_key(realm: &mut Realm, value: JsValue) -> JsResult<PropKey> {
     match value {
-        JsValue::String(value) => Ok(PropKey::Str(value)),
-        JsValue::Int(value) => Ok(PropKey::Str(Rc::from(value.to_string()))),
+        JsValue::String(value) => Ok(crate::object::key_from_string(value)),
+        JsValue::Int(value) => Ok(PropKey::Index(value.max(0) as usize)),
+        JsValue::Float(value) if value.fract() == 0.0 && value >= 0.0 => {
+            Ok(PropKey::Index(value as usize))
+        }
         JsValue::Float(value) => Ok(PropKey::Str(Rc::from(format_number(value)))),
         JsValue::Undefined => Ok(PropKey::from("undefined")),
         JsValue::Null => Ok(PropKey::from("null")),
@@ -1461,7 +1543,9 @@ pub fn add_values(realm: &mut Realm, left: JsValue, right: JsValue) -> JsResult<
         let right = to_string(realm, right)?;
         return Ok(JsValue::string(left + &right));
     }
-    Ok(JsValue::number(to_number(left)? + to_number(right)?))
+    Ok(JsValue::number(
+        to_numeric(realm, left)? + to_numeric(realm, right)?,
+    ))
 }
 
 pub fn to_primitive(realm: &mut Realm, value: JsValue) -> JsResult<JsValue> {

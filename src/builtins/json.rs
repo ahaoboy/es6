@@ -1,5 +1,5 @@
 use super::*;
-use crate::object::{ObjectKind, PropKey, Property};
+use crate::object::{ObjectKind, Property};
 use crate::value::JsValue;
 
 // QuickJS: JS_AddIntrinsicJSON / js_json_* (quickjs.c).
@@ -100,11 +100,10 @@ fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<
                     output.push('{');
                     let mut first = true;
                     for key in keys {
-                        let Some(key_text) = key.as_str() else {
+                        let Some(key_text) = key.to_rc_string() else {
                             continue;
                         };
-                        let item =
-                            crate::vm::get_value_property(realm, value, &PropKey::from(key_text))?;
+                        let item = crate::vm::get_value_property(realm, value, &key)?;
                         if item.is_undefined() || item.is_function() {
                             continue;
                         }
@@ -113,7 +112,8 @@ fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<
                         }
                         first = false;
                         output.push_str(
-                            &serde_json::to_string(key_text).unwrap_or_else(|_| "\"\"".into()),
+                            &serde_json::to_string(key_text.as_ref())
+                                .unwrap_or_else(|_| "\"\"".into()),
                         );
                         output.push(':');
                         let _ = to_json(realm, &item, output)?;

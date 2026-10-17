@@ -646,7 +646,7 @@ impl<'a> Parser<'a> {
                 params.push(pattern);
                 break;
             }
-            params.push(self.parse_binding_pattern()?);
+            params.push(self.parse_binding_pattern_with_default()?);
             if !self.eat_punct(Punct::Comma)? {
                 break;
             }
@@ -656,7 +656,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_binding_pattern(&mut self) -> Result<Pattern, ParseError> {
-        let mut pattern = if self.eat_punct(Punct::LBracket)? {
+        let pattern = if self.eat_punct(Punct::LBracket)? {
             let mut elements = Vec::new();
             while !self.current.is_punct(Punct::RBracket) {
                 if self.eat_punct(Punct::Comma)? {
@@ -667,7 +667,7 @@ impl<'a> Parser<'a> {
                     elements.push(Some(Pattern::Rest(Box::new(self.parse_binding_pattern()?))));
                     break;
                 }
-                elements.push(Some(self.parse_binding_pattern()?));
+                elements.push(Some(self.parse_binding_pattern_with_default()?));
                 if !self.eat_punct(Punct::Comma)? {
                     break;
                 }
@@ -713,13 +713,19 @@ impl<'a> Parser<'a> {
         } else {
             Pattern::Ident(self.binding_ident()?)
         };
+        Ok(pattern)
+    }
+
+    fn parse_binding_pattern_with_default(&mut self) -> Result<Pattern, ParseError> {
+        let pattern = self.parse_binding_pattern()?;
         if self.eat_punct(Punct::Assign)? {
-            pattern = Pattern::Assign {
+            Ok(Pattern::Assign {
                 target: Box::new(pattern),
                 default: Box::new(self.parse_assignment()?),
-            };
+            })
+        } else {
+            Ok(pattern)
         }
-        Ok(pattern)
     }
 
     /// QuickJS `js_parse_class` (quickjs.c:25571).
@@ -985,7 +991,7 @@ impl<'a> Parser<'a> {
                     params.push(Pattern::Rest(Box::new(self.parse_binding_pattern()?)));
                     break;
                 }
-                params.push(self.parse_binding_pattern()?);
+                params.push(self.parse_binding_pattern_with_default()?);
                 if !self.eat_punct(Punct::Comma)? {
                     break;
                 }

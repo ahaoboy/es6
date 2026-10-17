@@ -646,8 +646,8 @@ impl Context {
     }
 
     pub fn to_number(&self, value: &JsValue) -> Result<f64> {
-        let realm = self.realm.borrow_mut();
-        crate::vm::to_number(value.clone()).map_err(|value| {
+        let mut realm = self.realm.borrow_mut();
+        crate::vm::to_numeric(&mut realm, value.clone()).map_err(|value| {
             let message = crate::vm::display_error(&realm, value.clone());
             Error::from_value(value, message)
         })

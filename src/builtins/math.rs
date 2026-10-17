@@ -54,111 +54,122 @@ pub fn install(realm: &mut Realm) {
     define_builtin_object(realm, "Math", &math);
 }
 
-fn unary(arguments: &[JsValue], operation: impl Fn(f64) -> f64) -> JsResult<JsValue> {
-    Ok(JsValue::number(operation(arg_number(arguments, 0)?)))
+fn unary(
+    realm: &mut Realm,
+    arguments: &[JsValue],
+    operation: impl Fn(f64) -> f64,
+) -> JsResult<JsValue> {
+    Ok(JsValue::number(operation(crate::vm::to_numeric(
+        realm,
+        arg(arguments, 0),
+    )?)))
 }
 
-fn binary(arguments: &[JsValue], operation: impl Fn(f64, f64) -> f64) -> JsResult<JsValue> {
+fn binary(
+    realm: &mut Realm,
+    arguments: &[JsValue],
+    operation: impl Fn(f64, f64) -> f64,
+) -> JsResult<JsValue> {
     Ok(JsValue::number(operation(
-        arg_number(arguments, 0)?,
-        arg_number(arguments, 1)?,
+        crate::vm::to_numeric(realm, arg(arguments, 0))?,
+        crate::vm::to_numeric(realm, arg(arguments, 1))?,
     )))
 }
 
-fn abs(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::abs)
+fn abs(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::abs)
 }
-fn acos(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::acos)
+fn acos(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::acos)
 }
-fn acosh(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::acosh)
+fn acosh(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::acosh)
 }
-fn asin(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::asin)
+fn asin(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::asin)
 }
-fn asinh(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::asinh)
+fn asinh(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::asinh)
 }
-fn atan(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::atan)
+fn atan(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::atan)
 }
-fn atan2(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    binary(a, f64::atan2)
+fn atan2(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    binary(realm, a, f64::atan2)
 }
-fn atanh(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::atanh)
+fn atanh(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::atanh)
 }
-fn cbrt(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::cbrt)
+fn cbrt(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::cbrt)
 }
-fn ceil(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::ceil)
+fn ceil(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::ceil)
 }
-fn clz32(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+fn clz32(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     Ok(JsValue::number(
-        crate::vm::to_uint32(arg_number(a, 0)?).leading_zeros() as f64,
+        crate::vm::to_uint32(crate::vm::to_numeric(realm, arg(a, 0))?).leading_zeros() as f64,
     ))
 }
-fn cos(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::cos)
+fn cos(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::cos)
 }
-fn cosh(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::cosh)
+fn cosh(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::cosh)
 }
-fn exp(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::exp)
+fn exp(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::exp)
 }
-fn expm1(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::exp_m1)
+fn expm1(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::exp_m1)
 }
-fn floor(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::floor)
+fn floor(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::floor)
 }
-fn fround(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, |value| value as f32 as f64)
+fn fround(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, |value| value as f32 as f64)
 }
-fn hypot(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+fn hypot(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     let mut sum = 0.0;
     for value in a {
-        let number = crate::vm::to_number(value.clone())?;
+        let number = crate::vm::to_numeric(realm, value.clone())?;
         sum += number * number;
     }
     Ok(JsValue::number(sum.sqrt()))
 }
-fn imul(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    let left = crate::vm::to_int32(arg_number(a, 0)?);
-    let right = crate::vm::to_int32(arg_number(a, 1)?);
+fn imul(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    let left = crate::vm::to_int32(crate::vm::to_numeric(realm, arg(a, 0))?);
+    let right = crate::vm::to_int32(crate::vm::to_numeric(realm, arg(a, 1))?);
     Ok(JsValue::Int(left.wrapping_mul(right)))
 }
-fn log(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::ln)
+fn log(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::ln)
 }
-fn log10(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::log10)
+fn log10(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::log10)
 }
-fn log1p(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::ln_1p)
+fn log1p(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::ln_1p)
 }
-fn log2(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::log2)
+fn log2(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::log2)
 }
-fn max(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+fn max(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     let mut result = f64::NEG_INFINITY;
     for value in a {
-        result = result.max(crate::vm::to_number(value.clone())?);
+        result = result.max(crate::vm::to_numeric(realm, value.clone())?);
     }
     Ok(JsValue::number(result))
 }
-fn min(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+fn min(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     let mut result = f64::INFINITY;
     for value in a {
-        result = result.min(crate::vm::to_number(value.clone())?);
+        result = result.min(crate::vm::to_numeric(realm, value.clone())?);
     }
     Ok(JsValue::number(result))
 }
-fn pow(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    binary(a, f64::powf)
+fn pow(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    binary(realm, a, f64::powf)
 }
 fn random(_r: &mut Realm, _t: &JsValue, _a: &[JsValue]) -> JsResult<JsValue> {
     use std::cell::Cell;
@@ -173,11 +184,13 @@ fn random(_r: &mut Realm, _t: &JsValue, _a: &[JsValue]) -> JsResult<JsValue> {
     });
     Ok(JsValue::number(value))
 }
-fn round(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    Ok(JsValue::number((arg_number(a, 0)? + 0.5).floor()))
+fn round(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    Ok(JsValue::number(
+        (crate::vm::to_numeric(realm, arg(a, 0))? + 0.5).floor(),
+    ))
 }
-fn sign(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    let value = arg_number(a, 0)?;
+fn sign(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    let value = crate::vm::to_numeric(realm, arg(a, 0))?;
     Ok(JsValue::number(if value.is_nan() || value == 0.0 {
         value
     } else if value > 0.0 {
@@ -186,21 +199,21 @@ fn sign(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
         -1.0
     }))
 }
-fn sin(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::sin)
+fn sin(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::sin)
 }
-fn sinh(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::sinh)
+fn sinh(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::sinh)
 }
-fn sqrt(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::sqrt)
+fn sqrt(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::sqrt)
 }
-fn tan(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::tan)
+fn tan(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::tan)
 }
-fn tanh(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::tanh)
+fn tanh(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::tanh)
 }
-fn trunc(_r: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    unary(a, f64::trunc)
+fn trunc(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    unary(realm, a, f64::trunc)
 }

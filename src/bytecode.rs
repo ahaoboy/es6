@@ -6,6 +6,7 @@ pub enum Constant {
     String(Rc<str>),
     Function(Rc<FunctionDef>),
     Class(Rc<ClassDef>),
+    Strings(Rc<[Rc<str>]>),
     Regex { source: Rc<str>, flags: Rc<str> },
 }
 
@@ -46,7 +47,7 @@ pub struct FunctionDef {
 /// Stack-machine bytecode modeled after QuickJS' opcode set
 /// (`quickjs-opcode.h`, `DEF(...)` table). Like QuickJS' short opcodes, the
 /// common cases avoid atom/constant indirection; operands are immediates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Op {
     Nop,
     Undefined,
@@ -71,9 +72,9 @@ pub enum Op {
         depth: u16,
         slot: u16,
     },
-    GetGlobal(Rc<str>),
-    SetGlobal(Rc<str>),
-    DeleteGlobal(Rc<str>),
+    GetGlobal(u32),
+    SetGlobal(u32),
+    DeleteGlobal(u32),
 
     GetProp,
     SetProp,
@@ -92,7 +93,7 @@ pub enum Op {
     ArraySpread,
     ObjectSpread,
     ArrayRest(u16),
-    ObjectRest(Rc<[Rc<str>]>),
+    ObjectRest(u32),
 
     Call(u16),
     CallMethod(u16),
@@ -143,7 +144,7 @@ pub enum Op {
     Pos,
     BitNot,
     TypeOf,
-    TypeOfGlobal(Rc<str>),
+    TypeOfGlobal(u32),
     Void,
     Await,
 
@@ -157,8 +158,8 @@ pub enum Op {
         slot: u16,
         prefix: bool,
     },
-    IncGlobal(Rc<str>, bool),
-    DecGlobal(Rc<str>, bool),
+    IncGlobal(u32, bool),
+    DecGlobal(u32, bool),
     UpdateProp {
         delta: f64,
         prefix: bool,

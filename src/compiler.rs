@@ -185,8 +185,12 @@ impl Compiler {
     }
 
     fn push_string(&mut self, value: &str) {
-        let index = self.add_constant(Constant::String(Rc::from(value)));
+        let index = self.string_constant(value);
         self.emit(Op::PushConst(index));
+    }
+
+    fn string_constant(&mut self, value: &str) -> u32 {
+        self.add_constant(Constant::String(Rc::from(value)))
     }
 
     fn resolve(&self, name: &str) -> Option<VarRef> {
@@ -221,6 +225,13 @@ impl Compiler {
     }
 
     fn compile_script(&mut self, statements: &[Stmt]) -> Result<(), ParseError> {
+        // Global `var` bindings are hoisted and initialized to undefined before
+        // any statement runs; function declarations overwrite them afterwards.
+        for name in collect_var_names(statements) {
+            self.emit(Op::Undefined);
+            let name = self.string_constant(&name);
+            self.emit(Op::SetGlobal(name));
+        }
         self.hoist_functions(statements, true)?;
         for (index, statement) in statements.iter().enumerate() {
             if matches!(statement.kind, StmtKind::Function(_)) {
@@ -512,6 +523,11 @@ impl Compiler {
 
     fn compile_var_declaration(&mut self, declaration: &VarDecl) -> Result<(), ParseError> {
         for declarator in &declaration.declarations {
+            // `var x;` is fully handled by hoisting. In particular it must not
+            // overwrite a parameter binding with the same name.
+            if declarator.init.is_none() && declaration.kind == VarKind::Var {
+                continue;
+            }
             if let Some(init) = &declarator.init {
                 self.compile_expr(init)?;
             } else {
@@ -1182,7 +1198,8 @@ impl Compiler {
                         slot: reference.slot,
                     });
                 } else {
-                    self.emit(Op::GetGlobal(Rc::from(name.as_str())));
+                    let name = self.string_constant(name);
+                    self.emit(Op::GetGlobal(name));
                 }
             }
             ExprKind::This => self.emit(Op::This),
@@ -1395,7 +1412,8 @@ impl Compiler {
                             slot: reference.slot,
                         });
                     } else {
-                        self.emit(Op::GetGlobal(Rc::from(name.as_str())));
+                        let name = self.string_constant(name);
+                        self.emit(Op::GetGlobal(name));
                     }
                     self.emit(Op::SetPropKeep);
                 }
@@ -1726,7 +1744,8 @@ impl Compiler {
                 if let ExprKind::Ident(name) = &argument.kind
                     && self.resolve(name).is_none()
                 {
-                    self.emit(Op::TypeOfGlobal(Rc::from(name.as_str())));
+                    let name = self.string_constant(name);
+                    self.emit(Op::TypeOfGlobal(name));
                     return Ok(());
                 }
                 self.compile_expr(argument)?;
@@ -1749,7 +1768,8 @@ impl Compiler {
                     if let Some(reference) = self.resolve(name) {
                         let _ = reference;
                     } else {
-                        self.emit(Op::DeleteGlobal(Rc::from(name.as_str())));
+                        let name = self.string_constant(name);
+                        self.emit(Op::DeleteGlobal(name));
                         return Ok(());
                     }
                     self.emit(Op::False);
@@ -1792,9 +1812,11 @@ impl Compiler {
                         }
                     });
                 } else if delta > 0.0 {
-                    self.emit(Op::IncGlobal(Rc::from(name.as_str()), prefix));
+                    let name = self.string_constant(name);
+                    self.emit(Op::IncGlobal(name, prefix));
                 } else {
-                    self.emit(Op::DecGlobal(Rc::from(name.as_str()), prefix));
+                    let name = self.string_constant(name);
+                    self.emit(Op::DecGlobal(name, prefix));
                 }
             }
             ExprKind::Member {
@@ -1912,7 +1934,8 @@ impl Compiler {
                 slot: reference.slot,
             });
         } else {
-            self.emit(Op::GetGlobal(Rc::from(name)));
+            let name = self.string_constant(name);
+            self.emit(Op::GetGlobal(name));
         }
     }
 
@@ -1924,7 +1947,8 @@ impl Compiler {
             });
         } else {
             let _ = mode;
-            self.emit(Op::SetGlobal(Rc::from(name)));
+            let name = self.string_constant(name);
+            self.emit(Op::SetGlobal(name));
         }
     }
 
@@ -1932,7 +1956,8 @@ impl Compiler {
         match pattern {
             Pattern::Ident(name) => {
                 if matches!(mode, BindingMode::Global) {
-                    self.emit(Op::SetGlobal(Rc::from(name.as_str())));
+                    let name = self.string_constant(name);
+                    self.emit(Op::SetGlobal(name));
                 } else {
                     self.store_ident(name, mode);
                 }
@@ -1971,7 +1996,9 @@ impl Compiler {
                     if let PropertyName::Ident(name) = &property.key
                         && name == "..."
                     {
-                        self.emit(Op::ObjectRest(Rc::from(excluded.clone())));
+                        let excluded: Rc<[Rc<str>]> = Rc::from(excluded.clone());
+                        let index = self.add_constant(Constant::Strings(excluded));
+                        self.emit(Op::ObjectRest(index));
                         self.bind_pattern(&property.value, mode)?;
                         continue;
                     }
