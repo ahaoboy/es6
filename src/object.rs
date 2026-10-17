@@ -693,9 +693,15 @@ impl ObjectData {
     /// split between lookup and `JS_GetPropertyInternal` (quickjs.c:9110).
     pub fn resolve_property(&self, key: &PropKey) -> ResolvedProperty {
         if let Some(value) = self.get_array_value(key) {
+            let writable = match &self.kind {
+                ObjectKind::Array(_) => true,
+                ObjectKind::BoxedString(_) => false,
+                ObjectKind::TypedArray(_) => key.index().is_some(),
+                _ => true,
+            };
             return ResolvedProperty::Data {
                 value,
-                writable: key.as_str().is_none_or(|name| name != "length"),
+                writable,
                 own: true,
             };
         }

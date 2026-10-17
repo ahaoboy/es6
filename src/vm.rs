@@ -346,7 +346,9 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
                 let keys = source.borrow().enumerable_keys();
                 for key in keys {
                     if let Some(name) = key.to_rc_string()
-                        && excluded.iter().any(|excluded| excluded.as_ref() == name.as_ref())
+                        && excluded
+                            .iter()
+                            .any(|excluded| excluded.as_ref() == name.as_ref())
                     {
                         continue;
                     }
@@ -1267,8 +1269,7 @@ pub fn set_value_property(
                 }
                 crate::object::ResolvedProperty::Missing => {
                     let mut data = object.borrow_mut();
-                    if data.put_array_value(realm, key, &new_value)?.is_none() && data.extensible
-                    {
+                    if data.put_array_value(realm, key, &new_value)?.is_none() && data.extensible {
                         data.define(key.clone(), Property::data(new_value));
                     }
                     Ok(())
