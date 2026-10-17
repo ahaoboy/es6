@@ -1,0 +1,28 @@
+[package]
+name = "es6"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:miette"]
+
+[dependencies]
+indexmap = "2"
+unicode-ident = "1"
+ryu = "1"
+regress = "0.12"
+serde_json = { version = "1", features = ["preserve_order"] }
+time = { version = "0.3", features = ["local-offset", "parsing", "formatting"] }
+clap = { version = "4", features = ["derive"], optional = true }
+miette = { version = "7", features = ["fancy"], optional = true }
+
+[[bin]]
+name = "es6"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

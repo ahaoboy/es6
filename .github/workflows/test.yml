@@ -1,0 +1,65 @@
+name: test
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - "main"
+  pull_request:
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -CeEuo pipefail {0}
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    name: build-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: build-${{ matrix.target }}
+        run: |
+          echo "print(1+1)" >> test.js
+          cargo run test.js
+          cargo install --path .
+
+      - name: install mujs
+        uses: ahaoboy/easy-setup@v1
+        with:
+          url: |-
+            https://github.com/ahaoboy/mujs-build
+            https://github.com/quickjs-ng/quickjs
+
+      - name: bench
+        run: |
+          curl -L -o run.js https://github.com/ahaoboy/js-engine-benchmark/releases/download/nightly/run.js
+
+          mujs run.js
+          qjs run.js
+          es6 run.js
+
+      - name: react
+        run: |
+          curl -L -o babel.zip "https://github.com/ahaoboy/mujs-react/releases/download/nightly/babel.zip" && unzip -j babel.zip "index.js" -d .
+
+          mujs index.js
+          qjs index.js
+          es6 index.js

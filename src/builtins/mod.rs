@@ -1,0 +1,327 @@
+//! ECMAScript built-ins. Each module installs one constructor/prototype pair,
+//! mirroring the split used by QuickJS' `JS_AddIntrinsic*` functions
+//! (`quickjs.c`, around the `JS_NewContextRaw` initialization table).
+
+mod array;
+mod boolean;
+mod buffer;
+mod console;
+mod date;
+mod error;
+mod function;
+mod global;
+mod json;
+mod map;
+mod math;
+mod message;
+mod number;
+mod object;
+mod promise;
+mod regexp;
+mod set;
+mod string;
+mod symbol;
+
+use std::rc::Rc;
+
+use crate::object::{
+    JsFunction, NativeFn, ObjRef, Object, ObjectData, ObjectKind, PropKey, Property,
+};
+use crate::runtime::Realm;
+use crate::value::{JsResult, JsValue};
+
+pub fn install(realm: &mut Realm) {
+    object::install(realm);
+    function::install(realm);
+    array::install(realm);
+    buffer::install(realm);
+    string::install(realm);
+    number::install(realm);
+    boolean::install(realm);
+    error::install(realm);
+    math::install(realm);
+    json::install(realm);
+    regexp::install(realm);
+    map::install(realm);
+    set::install(realm);
+    symbol::install(realm);
+    promise::install(realm);
+    date::install(realm);
+    console::install(realm);
+    message::install(realm);
+    global::install(realm);
+}
+
+pub(crate) fn arg(arguments: &[JsValue], index: usize) -> JsValue {
+    arguments.get(index).cloned().unwrap_or(JsValue::Undefined)
+}
+
+pub(crate) fn arg_number(arguments: &[JsValue], index: usize) -> JsResult<f64> {
+    crate::vm::to_number(arg(arguments, index))
+}
+
+pub(crate) fn define_value(target: &ObjRef, name: &str, value: impl Into<JsValue>) {
+    target
+        .borrow_mut()
+        .define(name, Property::data(value.into()));
+}
+
+pub(crate) fn define_method(
+    realm: &mut Realm,
+    target: &ObjRef,
+    name: &str,
+    length: u32,
+    native: NativeFn,
+) {
+    let function = realm.native_function(name, length, native);
+    target.borrow_mut().define(name, Property::hidden(function));
+}
+
+pub(crate) fn define_method_symbol(
+    realm: &mut Realm,
+    target: &ObjRef,
+    symbol: u32,
+    name: &str,
+    length: u32,
+    native: NativeFn,
+) {
+    let function = realm.native_function(name, length, native);
+    target
+        .borrow_mut()
+        .define(PropKey::Symbol(symbol), Property::hidden(function));
+}
+
+pub(crate) fn define_accessor(
+    realm: &mut Realm,
+    target: &ObjRef,
+    name: &str,
+    getter: NativeFn,
+    setter: Option<NativeFn>,
+) {
+    let getter = realm.native_function(&format!("get {name}"), 0, getter);
+    let setter = setter.map(|setter| realm.native_function(&format!("set {name}"), 1, setter));
+    target.borrow_mut().define(
+        name,
+        Property {
+            value: JsValue::Undefined,
+            get: Some(getter),
+            set: setter,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        },
+    );
+}
+
+pub(crate) fn install_constructor(
+    realm: &mut Realm,
+    name: &str,
+    length: u32,
+    native: NativeFn,
+    prototype: &ObjRef,
+) -> JsValue {
+    let function = realm.native_function(name, length, native);
+    if let Some(object) = function.as_object() {
+        object.set("prototype", JsValue::Object(prototype.clone()));
+    }
+    prototype
+        .borrow_mut()
+        .define("constructor", Property::hidden(function.clone()));
+    Object::from_ref(realm.global.clone()).set(name, function.clone());
+    function
+}
+
+pub(crate) fn require_object(realm: &Realm, value: &JsValue) -> JsResult<Object> {
+    value
+        .as_object()
+        .ok_or_else(|| realm.type_error("Expected an object"))
+}
+
+pub(crate) fn this_object(realm: &Realm, this: &JsValue) -> JsResult<Object> {
+    require_object(realm, this)
+}
+
+pub(crate) fn this_string(realm: &mut Realm, this: &JsValue) -> JsResult<String> {
+    match this {
+        JsValue::String(value) => Ok(value.to_string()),
+        JsValue::Object(object) => {
+            if let ObjectKind::BoxedString(value) = &object.borrow().kind {
+                Ok(value.to_string())
+            } else {
+                crate::vm::to_string(realm, this.clone())
+            }
+        }
+        _ => crate::vm::to_string(realm, this.clone()),
+    }
+}
+
+pub(crate) fn this_number(realm: &Realm, this: &JsValue) -> JsResult<f64> {
+    match this {
+        JsValue::Int(value) => Ok(*value as f64),
+        JsValue::Float(value) => Ok(*value),
+        JsValue::Object(object) => match &object.borrow().kind {
+            ObjectKind::BoxedNumber(value) => Ok(*value),
+            _ => Err(realm.type_error("Number.prototype method called on incompatible receiver")),
+        },
+        _ => Err(realm.type_error("Number.prototype method called on incompatible receiver")),
+    }
+}
+
+pub(crate) fn this_boolean(realm: &Realm, this: &JsValue) -> JsResult<bool> {
+    match this {
+        JsValue::Bool(value) => Ok(*value),
+        JsValue::Object(object) => match &object.borrow().kind {
+            ObjectKind::BoxedBool(value) => Ok(*value),
+            _ => Err(realm.type_error("Boolean.prototype method called on incompatible receiver")),
+        },
+        _ => Err(realm.type_error("Boolean.prototype method called on incompatible receiver")),
+    }
+}
+
+pub(crate) fn array_object(realm: &Realm, this: &JsValue) -> JsResult<Object> {
+    this.as_object()
+        .ok_or_else(|| realm.type_error("Array method called on non-object"))
+}
+
+pub(crate) fn array_items(realm: &mut Realm, object: &Object) -> JsResult<Vec<JsValue>> {
+    let data = object.to_ref();
+    let data = data.borrow();
+    if let ObjectKind::Array(array) = &data.kind {
+        return Ok(array.items.clone());
+    }
+    drop(data);
+    let length_value = crate::vm::get_value_property(
+        realm,
+        &JsValue::Object(object.to_ref()),
+        &PropKey::from("length"),
+    )?;
+    let length = crate::vm::to_uint32(crate::vm::to_number(length_value)?) as usize;
+    let mut items = Vec::with_capacity(length);
+    for index in 0..length {
+        items.push(crate::vm::get_value_property(
+            realm,
+            &JsValue::Object(object.to_ref()),
+            &PropKey::Str(Rc::from(index.to_string())),
+        )?);
+    }
+    Ok(items)
+}
+
+pub(crate) fn set_array_items(realm: &mut Realm, object: &Object, items: Vec<JsValue>) {
+    let length = items.len();
+    let reference = object.to_ref();
+    let mut data = reference.borrow_mut();
+    if let ObjectKind::Array(array) = &mut data.kind {
+        array.items = items;
+        array.length = length;
+        return;
+    }
+    drop(data);
+    for (index, item) in items.into_iter().enumerate() {
+        let _ = crate::vm::set_value_property(
+            realm,
+            &JsValue::Object(object.to_ref()),
+            &PropKey::Str(Rc::from(index.to_string())),
+            item,
+            true,
+        );
+    }
+    let _ = crate::vm::set_value_property(
+        realm,
+        &JsValue::Object(object.to_ref()),
+        &PropKey::from("length"),
+        JsValue::number(length as f64),
+        true,
+    );
+}
+
+pub(crate) fn bound_function(
+    realm: &Realm,
+    target: JsValue,
+    this: JsValue,
+    prefix: Vec<JsValue>,
+    name: &str,
+    length: u32,
+) -> JsValue {
+    let function = Rc::new(JsFunction {
+        name: Rc::from(name),
+        length,
+        native: None,
+        def: None,
+        env: None,
+        bound: Some(crate::object::BoundFunction {
+            target,
+            this,
+            arguments: prefix,
+        }),
+        lexical_this: None,
+        instance_init: None,
+    });
+    JsValue::Object(realm.function_object(function))
+}
+
+pub(crate) fn define_builtin_object(realm: &mut Realm, name: &str, object: &ObjRef) {
+    Object::from_ref(realm.global.clone()).set(name, JsValue::Object(object.clone()));
+}
+
+pub(crate) fn call(
+    realm: &mut Realm,
+    function: JsValue,
+    this: JsValue,
+    arguments: &[JsValue],
+) -> JsResult<JsValue> {
+    crate::vm::call_value(realm, function, this, arguments)
+}
+
+pub(crate) fn get(realm: &mut Realm, value: &JsValue, key: &str) -> JsResult<JsValue> {
+    crate::vm::get_value_property(realm, value, &PropKey::from(key))
+}
+
+pub(crate) fn set(
+    realm: &mut Realm,
+    value: &JsValue,
+    key: &str,
+    new_value: JsValue,
+) -> JsResult<()> {
+    crate::vm::set_value_property(realm, value, &PropKey::from(key), new_value, true)
+}
+
+pub(crate) fn to_integer(value: f64) -> i64 {
+    if value.is_nan() {
+        0
+    } else if value.is_infinite() {
+        if value > 0.0 { i64::MAX } else { i64::MIN }
+    } else {
+        value.trunc() as i64
+    }
+}
+
+pub(crate) fn normalize_index(index: f64, length: usize) -> usize {
+    let length = length as i64;
+    let mut index = to_integer(index);
+    if index < 0 {
+        index = (length + index).max(0);
+    }
+    index.min(length) as usize
+}
+
+pub(crate) fn object_kind_name(object: &ObjectData) -> &'static str {
+    match &object.kind {
+        ObjectKind::Array(_) => "Array",
+        ObjectKind::Function(_) => "Function",
+        ObjectKind::BoxedString(_) => "String",
+        ObjectKind::BoxedNumber(_) => "Number",
+        ObjectKind::BoxedBool(_) => "Boolean",
+        ObjectKind::Date(_) => "Date",
+        ObjectKind::RegExp(_) => "RegExp",
+        ObjectKind::Map(_) => "Map",
+        ObjectKind::Set(_) => "Set",
+        ObjectKind::Promise(_) => "Promise",
+        ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
+        ObjectKind::DataView(_) => "DataView",
+        ObjectKind::TypedArray(data) => data.kind.name(),
+        ObjectKind::Error => "Error",
+        ObjectKind::Iterator { .. } => "Iterator",
+        ObjectKind::Ordinary => "Object",
+    }
+}
