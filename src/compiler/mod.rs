@@ -96,13 +96,13 @@ pub fn compile_module(program: &Program) -> Result<Rc<FunctionDef>, ParseError> 
         is_generator: false,
         span: Span::default(),
     };
-    let def = compiler.compile_function(&function, false, false)?;
+    let def = compiler.compile_function(&function, false, false, false)?;
     Ok(crate::gc::register_def(def))
 }
 
 pub fn compile_function_source(function: &Function) -> Result<Rc<FunctionDef>, ParseError> {
     let mut compiler = Compiler::new(false, Vec::new(), function.name.clone().unwrap_or_default());
-    let def = compiler.compile_function(function, false, false)?;
+    let def = compiler.compile_function(function, false, false, false)?;
     Ok(crate::gc::register_def(def))
 }
 
@@ -188,6 +188,7 @@ impl Compiler {
             strict,
             is_class_fields: name == "<class_fields>",
             source: self.source_name,
+            name_atom: std::cell::RefCell::new(None),
         }
     }
 
@@ -375,6 +376,7 @@ impl Compiler {
         function: &Function,
         is_constructor: bool,
         super_allowed: bool,
+        is_declaration: bool,
     ) -> Result<Rc<FunctionDef>, ParseError> {
         let mut child = Compiler::new(false, self.capture_frames(), self.source_name.clone());
         child.super_allowed = super_allowed;
@@ -400,8 +402,10 @@ impl Compiler {
         // Named function expressions bind their own name in the function
         // scope so the body can self-reference it, like QuickJS' function
         // scope var for named expressions (`js_parse_function_decl2`,
-        // quickjs.c:37379).
-        if !function.is_arrow
+        // quickjs.c:37379). Declarations already resolve the name from the
+        // enclosing scope, so they skip the per-call binding.
+        if !is_declaration
+            && !function.is_arrow
             && let Some(name) = &function.name
             && !name.is_empty()
         {
@@ -422,6 +426,19 @@ impl Compiler {
                 Pattern::Rest(inner) => {
                     child.emit(Op::RestArgs(index as u16));
                     child.bind_pattern(inner, BindingMode::Auto)?;
+                }
+                // Simple parameters bind straight into their slot.
+                Pattern::Ident(name) => {
+                    if let Some(reference) = child.resolve(name) {
+                        child.emit(Op::LoadArgInto {
+                            arg: index as u16,
+                            depth: reference.depth,
+                            slot: reference.slot,
+                        });
+                    } else {
+                        child.emit(Op::LoadArg(index as u16));
+                        child.bind_pattern(param, BindingMode::Auto)?;
+                    }
                 }
                 _ => {
                     child.emit(Op::LoadArg(index as u16));
@@ -491,7 +508,7 @@ impl Compiler {
             let Some(name) = &function.name else {
                 continue;
             };
-            let def = self.compile_function(function, false, false)?;
+            let def = self.compile_function(function, false, false, true)?;
             let constant = self.add_constant(Constant::Function(def));
             self.emit(Op::Closure(constant));
             self.store_ident(name, BindingMode::Auto);

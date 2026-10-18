@@ -26,7 +26,7 @@ pub fn call_value(
     call_value_owned(realm, callee, this, arguments.iter().cloned().collect())
 }
 
-#[inline(never)]
+#[inline]
 pub(crate) fn call_value_owned(
     realm: &mut Realm,
     callee: JsValue,
@@ -96,7 +96,7 @@ pub(crate) fn call_value_owned(
     realm.call_depth += 1;
     let result = super::run_frame(
         realm,
-        definition.clone(),
+        definition,
         env,
         this,
         Some(callee),

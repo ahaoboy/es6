@@ -179,22 +179,20 @@ impl JsValue {
         }
     }
 
+    #[inline(always)]
     pub fn number(value: f64) -> Self {
-        // Negative zero must stay a float: collapsing it into `Int(0)`
-        // would lose the sign bit (ES2022 6.1.6.1.3, `Object.is(0, -0)`).
-        if value == 0.0 {
-            return if value.is_sign_negative() {
+        // Saturating cast round-trip: exact for every integral double in i32
+        // range, one multiply-free compare for the rest (NaN/inf/huge all
+        // fail the equality test). Negative zero must stay a float: collapsing
+        // it into `Int(0)` would lose the sign bit (ES2022 6.1.6.1.3,
+        // `Object.is(0, -0)`).
+        let integer = value as i32;
+        if integer as f64 == value {
+            if integer == 0 && value.is_sign_negative() {
                 Self::Float(value)
             } else {
-                Self::Int(0)
-            };
-        }
-        if value.is_finite()
-            && value.fract() == 0.0
-            && value >= i32::MIN as f64
-            && value <= i32::MAX as f64
-        {
-            Self::Int(value as i32)
+                Self::Int(integer)
+            }
         } else {
             Self::Float(value)
         }
@@ -221,6 +219,7 @@ impl JsValue {
             lexical_this: None,
             instance_init: None,
             has_super: false,
+            prototype: std::cell::RefCell::new(None),
         };
         Self::from_function(Rc::new(function))
     }

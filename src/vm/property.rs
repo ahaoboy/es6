@@ -9,7 +9,7 @@ use std::rc::Rc;
 use super::ValueStack;
 use super::call::call_value;
 use super::ops::pop;
-use crate::object::{ObjectData, PropCache, PropKey, Property, ResolvedProperty};
+use crate::object::{PropCache, PropKey, Property, ResolvedProperty};
 use crate::runtime::Realm;
 use crate::value::{JsResult, JsValue};
 
@@ -17,7 +17,28 @@ use crate::value::{JsResult, JsValue};
 pub fn get_value_property(realm: &mut Realm, value: &JsValue, key: &PropKey) -> JsResult<JsValue> {
     match value {
         JsValue::Object(object) => {
-            let resolved = object.borrow().resolve_property(key);
+            let (resolved, needs_prototype) = {
+                let data = object.borrow();
+                let resolved = data.resolve_property(key);
+                // Constructable functions materialize `.prototype` on first
+                // access instead of at creation.
+                let needs_prototype = matches!(resolved, ResolvedProperty::Missing)
+                    && matches!(key, PropKey::Str(name) if name.as_ref() == "prototype")
+                    && matches!(
+                        &data.kind,
+                        crate::object::ObjectKind::Function(function)
+                            if function.is_constructable() && function.prototype.borrow().is_none()
+                    );
+                (resolved, needs_prototype)
+            };
+            if needs_prototype {
+                let function = match &object.borrow().kind {
+                    crate::object::ObjectKind::Function(function) => function.clone(),
+                    _ => return Ok(JsValue::Undefined),
+                };
+                realm.function_prototype(object, &function);
+                return get_value_property(realm, value, key);
+            }
             match resolved {
                 crate::object::ResolvedProperty::Data { value, .. } => Ok(value),
                 crate::object::ResolvedProperty::Accessor {
@@ -44,20 +65,23 @@ pub fn get_value_property(realm: &mut Realm, value: &JsValue, key: &PropKey) -> 
             {
                 return Ok(JsValue::string(ch));
             }
-            let prototype = ObjectData::ordinary(Some(realm.string_proto.clone()));
-            prototype.get_property(realm, key, value)
+            // Walk the primitive's prototype directly; no temporary wrapper
+            // object is allocated, like QuickJS' exotic string handling in
+            // `JS_GetPropertyInternal` (quickjs.c:9110).
+            let prototype = realm.string_proto.clone();
+            super::call::get_property_receiver(realm, &JsValue::Object(prototype), key, value)
         }
         JsValue::Bool(_) => {
-            let prototype = ObjectData::ordinary(Some(realm.boolean_proto.clone()));
-            prototype.get_property(realm, key, value)
+            let prototype = realm.boolean_proto.clone();
+            super::call::get_property_receiver(realm, &JsValue::Object(prototype), key, value)
         }
         JsValue::Int(_) | JsValue::Float(_) => {
-            let prototype = ObjectData::ordinary(Some(realm.number_proto.clone()));
-            prototype.get_property(realm, key, value)
+            let prototype = realm.number_proto.clone();
+            super::call::get_property_receiver(realm, &JsValue::Object(prototype), key, value)
         }
         JsValue::Symbol(_) => {
-            let prototype = ObjectData::ordinary(Some(realm.symbol_proto.clone()));
-            prototype.get_property(realm, key, value)
+            let prototype = realm.symbol_proto.clone();
+            super::call::get_property_receiver(realm, &JsValue::Object(prototype), key, value)
         }
         JsValue::Undefined | JsValue::Null => Err(realm.type_error(format!(
             "Cannot read properties of {} (reading '{}')",

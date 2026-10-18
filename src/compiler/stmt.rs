@@ -136,7 +136,7 @@ impl Compiler {
                 self.compile_var_declaration(declaration)?;
             }
             StmtKind::Function(function) => {
-                let def = self.compile_function(function, false, false)?;
+                let def = self.compile_function(function, false, false, true)?;
                 let constant = self.add_constant(Constant::Function(def));
                 self.emit(Op::Closure(constant));
                 if let Some(name) = &function.name {
@@ -521,6 +521,122 @@ impl Compiler {
                 Some(ForInit::Var(declaration)) => declaration,
                 _ => unreachable!(),
             };
+            // QuickJS only materializes a fresh binding per iteration when a
+            // closure can observe it (`resolve_variables`, quickjs.c:35111).
+            // Without captures the loop variables live in the enclosing
+            // scope like `var`, which removes the per-iteration
+            // PushEnv/copy/PopEnv sequence entirely.
+            let names: Vec<String> = declaration
+                .declarations
+                .iter()
+                .flat_map(|declarator| pattern_names(&declarator.pattern))
+                .collect();
+            // Probe the test/update expressions too: a nested function there
+            // could also observe the per-iteration binding.
+            let capture_probe = {
+                let mut probe = Vec::new();
+                if let Some(test) = test {
+                    probe.push(Stmt {
+                        kind: StmtKind::Expr(test.clone()),
+                        span: body.span,
+                    });
+                }
+                if let Some(update) = update {
+                    probe.push(Stmt {
+                        kind: StmtKind::Expr(update.clone()),
+                        span: body.span,
+                    });
+                }
+                probe.push(body.clone());
+                Stmt {
+                    kind: StmtKind::Block(probe),
+                    span: body.span,
+                }
+            };
+            if !body_captures_names(&capture_probe, &names) {
+                let frame = self.local_frames.last_mut().expect("scope frame");
+                for name in &names {
+                    frame.declare(name);
+                }
+                match init {
+                    Some(ForInit::Var(declaration)) => {
+                        self.compile_var_declaration(declaration)?;
+                    }
+                    _ => unreachable!(),
+                }
+                // Fall through to the shared fused loop body below.
+                let start = self.position();
+                let end_jump = if let Some(test) = test {
+                    Some(self.emit_test_jump(test, false)?)
+                } else {
+                    None
+                };
+                let body_start = self.position();
+                let next_plan = self.for_next_plan(test.as_ref(), update.as_ref());
+                let break_context = BreakContext {
+                    label: None,
+                    env_depth: self.local_frames.len(),
+                    stack_cleanup: 0,
+                    try_depth: self.try_depth,
+                    jumps: Vec::new(),
+                };
+                let loop_context = LoopContext {
+                    label: None,
+                    env_depth: self.local_frames.len(),
+                    stack_cleanup: 0,
+                    try_depth: self.try_depth,
+                    continue_target: None,
+                    continue_jumps: Vec::new(),
+                };
+                self.breakables.push(break_context);
+                self.loops.push(loop_context);
+                self.compile_statement(body)?;
+                let continue_target = self.position();
+                let mut jumped = false;
+                if let Some(plan) = next_plan {
+                    match plan.limit {
+                        LoopLimit::Var { depth, slot } => self.emit(Op::ForNext {
+                            depth: plan.depth,
+                            slot: plan.slot,
+                            delta: plan.delta,
+                            limit_depth: depth,
+                            limit_slot: slot,
+                            op: plan.op,
+                            body: body_start as u32,
+                        }),
+                        LoopLimit::Const(value) => self.emit(Op::ForNextConst {
+                            depth: plan.depth,
+                            slot: plan.slot,
+                            delta: plan.delta,
+                            value: value as i32,
+                            op: plan.op,
+                            body: body_start as u32,
+                        }),
+                    }
+                    jumped = true;
+                }
+                if !jumped {
+                    if let Some(update) = update {
+                        self.compile_expr(update)?;
+                        self.emit(Op::Pop);
+                    }
+                    self.emit(Op::Jump(start as u32));
+                }
+                let loop_context = self.loops.pop().unwrap();
+                let break_context = self.breakables.pop().unwrap();
+                let end = self.position();
+                if let Some(jump) = end_jump {
+                    self.patch_jump(jump, end);
+                }
+                for jump in break_context.jumps {
+                    self.patch_jump(jump, end);
+                }
+                for jump in loop_context.continue_jumps {
+                    self.patch_jump(jump, continue_target);
+                }
+                let _ = start;
+                return Ok(());
+            }
             let mut frame = ScopeFrame::new();
             for declarator in &declaration.declarations {
                 for name in pattern_names(&declarator.pattern) {
@@ -717,13 +833,30 @@ impl Compiler {
         _is_await: bool,
     ) -> Result<(), ParseError> {
         let lexical = matches!(left, ForInit::Var(declaration) if declaration.kind != VarKind::Var);
+        // As with `for (let ...;;)`: only materialize a fresh binding per
+        // iteration when nested functions can observe it. Otherwise the
+        // binding lives in the enclosing scope and no per-iteration
+        // PushEnv/PopEnv pair is emitted.
+        let flat_binding = if lexical {
+            let ForInit::Var(declaration) = left else {
+                unreachable!();
+            };
+            let names: Vec<String> = declaration
+                .declarations
+                .first()
+                .map(|declarator| pattern_names(&declarator.pattern))
+                .unwrap_or_default();
+            !body_captures_names(body, &names)
+        } else {
+            false
+        };
         let outer_depth = self.local_frames.len();
         self.compile_expr(right)?;
         self.emit(if is_in { Op::ForInInit } else { Op::IterInit });
         let start = self.position();
         let end_jump = self.emit_jump(Op::IterNext(0));
         let mut iteration_size = 0;
-        if lexical {
+        if lexical && !flat_binding {
             let ForInit::Var(declaration) = left else {
                 unreachable!();
             };
@@ -736,6 +869,17 @@ impl Compiler {
             iteration_size = frame.size;
             self.local_frames.push(frame);
             self.emit(Op::PushEnv(iteration_size));
+        } else if lexical {
+            let ForInit::Var(declaration) = left else {
+                unreachable!();
+            };
+            if let Some(declarator) = declaration.declarations.first() {
+                let names = pattern_names(&declarator.pattern);
+                let frame = self.local_frames.last_mut().expect("scope frame");
+                for name in &names {
+                    frame.declare(name);
+                }
+            }
         }
         match left {
             ForInit::Var(declaration) => {
@@ -767,7 +911,7 @@ impl Compiler {
         self.compile_statement(body)?;
         let loop_context = self.loops.pop().unwrap();
         let break_context = self.breakables.pop().unwrap();
-        if lexical {
+        if lexical && !flat_binding {
             self.emit(Op::PopEnv);
             self.local_frames.pop();
         }

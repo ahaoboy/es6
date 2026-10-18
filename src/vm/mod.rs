@@ -36,8 +36,11 @@ pub use crate::coerce::{
     to_uint32,
 };
 
-pub(crate) type ValueStack = SmallVec<[JsValue; 4]>;
-pub(crate) type ArgumentStack = SmallVec<[JsValue; 4]>;
+/// Operand stack. Inline capacity covers typical expression depths, so most
+/// `push`/`pop` pairs never touch the heap (the QuickJS equivalent lives in
+/// the `JS_CallInternal` alloca, quickjs.c:18051).
+pub(crate) type ValueStack = SmallVec<[JsValue; 32]>;
+pub(crate) type ArgumentStack = SmallVec<[JsValue; 8]>;
 
 /// A queued job. QuickJS stores the same entries in `JSContext.job_list` and
 /// dispatches them in `JS_ExecutePendingJob` (quickjs.c:2525).
@@ -184,11 +187,7 @@ fn run_loop(
         }
         let op = code[pc];
         pc += 1;
-        let step = match ops::execute_hot(realm, &mut frame, &mut pc, op) {
-            Ok(Some(step)) => Ok(step),
-            Ok(None) => ops::execute_op(realm, &mut frame, &mut pc, op),
-            Err(error) => Err(error),
-        };
+        let step = ops::execute_op(realm, &mut frame, &mut pc, op);
         match step {
             Ok(Step::Continue) => {}
             Ok(Step::Return) => {

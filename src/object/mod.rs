@@ -39,6 +39,12 @@ pub struct PropCache {
     pub can_insert: bool,
     pub own: bool,
     pub valid: bool,
+    /// The canonical key of this site, built once from the bytecode
+    /// constant: repeated accesses clone the atom instead of re-parsing and
+    /// re-canonicalizing the text (QuickJS interns atoms once the same way).
+    pub key: Option<PropKey>,
+    /// Prepared property map for an object-literal site.
+    pub literal: Option<PropertyMap>,
 }
 
 static PROTOTYPE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -235,7 +241,9 @@ impl ObjectData {
 
     pub fn new_function(function: Rc<JsFunction>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            // `length` and `name` are defined right after construction; size
+            // the map once instead of growing it per insert.
+            props: PropertyMap::with_capacity_and_hasher(2, FxBuildHasher),
             prototype: None,
             kind: ObjectKind::Function(function),
             extensible: true,
@@ -285,7 +293,12 @@ impl ObjectData {
         Self {
             props: PropertyMap::default(),
             prototype,
-            kind: ObjectKind::Map(entries),
+            kind: ObjectKind::Map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (MapKey(key), value))
+                    .collect(),
+            ),
             extensible: true,
             class_name: "Map",
             shape: 0,
@@ -314,7 +327,7 @@ impl ObjectData {
         Self {
             props: PropertyMap::default(),
             prototype,
-            kind: ObjectKind::Set(values),
+            kind: ObjectKind::Set(values.into_iter().map(MapKey).collect()),
             extensible: true,
             class_name: "Set",
             shape: 0,

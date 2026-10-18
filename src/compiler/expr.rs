@@ -25,12 +25,12 @@ impl Compiler {
             ExprKind::Array(elements) => self.compile_array_literal(elements)?,
             ExprKind::Object(properties) => self.compile_object_literal(properties)?,
             ExprKind::Function(function) => {
-                let def = self.compile_function(function, false, false)?;
+                let def = self.compile_function(function, false, false, false)?;
                 let constant = self.add_constant(Constant::Function(def));
                 self.emit(Op::Closure(constant));
             }
             ExprKind::Arrow(function) => {
-                let def = self.compile_function(function, false, false)?;
+                let def = self.compile_function(function, false, false, false)?;
                 let constant = self.add_constant(Constant::Function(def));
                 self.emit(Op::Closure(constant));
             }
@@ -210,7 +210,12 @@ impl Compiler {
                             fused = true;
                         }
                     }
-                    if !fused {
+                    if !fused
+                        && let MemberProperty::Ident(name) = property
+                        && let Some(fused) = self.try_fused_member_read(object, name)
+                    {
+                        debug_assert!(fused);
+                    } else if !fused {
                         self.compile_expr(object)?;
                         match property {
                             MemberProperty::Ident(name) => {
@@ -419,9 +424,11 @@ impl Compiler {
                     }
                 }
                 let keys = self.add_constant(Constant::Strings(Rc::from(keys)));
+                let cache = self.add_prop_cache();
                 self.emit(Op::NewObjectFrom {
                     keys,
                     count: properties.len() as u16,
+                    cache,
                 });
                 return Ok(());
             }
@@ -459,7 +466,7 @@ impl Compiler {
                 } => {
                     self.emit(Op::Dup);
                     self.compile_key_name(key)?;
-                    let def = self.compile_function(function, false, false)?;
+                    let def = self.compile_function(function, false, false, false)?;
                     let constant = self.add_constant(Constant::Function(def));
                     self.emit(Op::Closure(constant));
                     match kind {
@@ -706,6 +713,54 @@ impl Compiler {
                 }
                 return Ok(());
             }
+            // `local.method(args)` / `this.method(args)` fused calls. The
+            // arguments must be side-effect free so the receiver/method
+            // resolution order stays observably identical.
+            if !has_spread
+                && let MemberProperty::Ident(name) = property
+                && arguments.iter().all(|argument| match argument {
+                    Argument::Expr(expression) => expr_is_stable(expression),
+                    Argument::Spread(_) => false,
+                })
+            {
+                match &object.kind {
+                    ExprKind::Ident(object_name) => {
+                        if let Some(reference) = self.resolve(object_name) {
+                            for argument in arguments {
+                                if let Argument::Expr(expression) = argument {
+                                    self.compile_expr(expression)?;
+                                }
+                            }
+                            let key = self.string_constant(name);
+                            let cache = self.add_prop_cache();
+                            self.emit(Op::CallVarMethodConst {
+                                depth: reference.depth,
+                                slot: reference.slot,
+                                key,
+                                cache,
+                                argc: arguments.len() as u16,
+                            });
+                            return Ok(());
+                        }
+                    }
+                    ExprKind::This => {
+                        for argument in arguments {
+                            if let Argument::Expr(expression) = argument {
+                                self.compile_expr(expression)?;
+                            }
+                        }
+                        let key = self.string_constant(name);
+                        let cache = self.add_prop_cache();
+                        self.emit(Op::CallThisMethodConst {
+                            key,
+                            cache,
+                            argc: arguments.len() as u16,
+                        });
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
             self.compile_expr(object)?;
             self.emit(Op::Dup);
             match property {
@@ -751,6 +806,33 @@ impl Compiler {
             });
         }
         Ok(())
+    }
+
+    /// `local.prop` / `this.prop` superinstruction: emits the fused read and
+    /// returns `Some(true)` when it applies. No operand ordering concerns
+    /// exist for pure reads.
+    fn try_fused_member_read(&mut self, object: &Expr, name: &str) -> Option<bool> {
+        match &object.kind {
+            ExprKind::Ident(object_name) => {
+                let reference = self.resolve(object_name)?;
+                let key = self.string_constant(name);
+                let cache = self.add_prop_cache();
+                self.emit(Op::GetVarPropConst {
+                    depth: reference.depth,
+                    slot: reference.slot,
+                    key,
+                    cache,
+                });
+                Some(true)
+            }
+            ExprKind::This => {
+                let key = self.string_constant(name);
+                let cache = self.add_prop_cache();
+                self.emit(Op::GetThisPropConst { key, cache });
+                Some(true)
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn compile_arguments(&mut self, arguments: &[Argument]) -> Result<(), ParseError> {
@@ -985,6 +1067,37 @@ impl Compiler {
                         index_slot: index_ref.slot,
                     });
                     return Ok(());
+                }
+                // `local.prop = value` / `this.prop = value` fused stores,
+                // guarded by value stability so evaluation order is intact.
+                if op == AssignOp::Assign
+                    && let MemberProperty::Ident(name) = property
+                    && expr_is_stable(value)
+                {
+                    match &object.kind {
+                        ExprKind::Ident(object_name) => {
+                            if let Some(reference) = self.resolve(object_name) {
+                                self.compile_expr(value)?;
+                                let key = self.string_constant(name);
+                                let cache = self.add_prop_cache();
+                                self.emit(Op::SetVarPropConstKeep {
+                                    depth: reference.depth,
+                                    slot: reference.slot,
+                                    key,
+                                    cache,
+                                });
+                                return Ok(());
+                            }
+                        }
+                        ExprKind::This => {
+                            self.compile_expr(value)?;
+                            let key = self.string_constant(name);
+                            let cache = self.add_prop_cache();
+                            self.emit(Op::SetThisPropConstKeep { key, cache });
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                 }
                 self.compile_expr(object)?;
                 if let MemberProperty::Ident(name) = property {

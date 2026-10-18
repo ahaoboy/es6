@@ -167,17 +167,26 @@ pub(crate) fn this_object(realm: &Realm, this: &JsValue) -> JsResult<Object> {
     require_object(realm, this)
 }
 
-pub(crate) fn this_string(realm: &mut Realm, this: &JsValue) -> JsResult<String> {
+/// The `this` value as a string, sharing the atom allocation instead of
+/// copying: string primitives and boxed strings hand back their `JsString`
+/// (QuickJS does the same with its `JSString *` payload).
+pub(crate) fn this_string(realm: &mut Realm, this: &JsValue) -> JsResult<crate::string::JsString> {
     match this {
-        JsValue::String(value) => Ok(value.to_string()),
+        JsValue::String(value) => Ok(value.clone()),
         JsValue::Object(object) => {
             if let ObjectKind::BoxedString(value) = &object.borrow().kind {
-                Ok(value.to_string())
+                Ok(value.clone())
             } else {
-                crate::vm::to_string(realm, this.clone())
+                Ok(crate::string::JsString::from(crate::vm::to_string(
+                    realm,
+                    this.clone(),
+                )?))
             }
         }
-        _ => crate::vm::to_string(realm, this.clone()),
+        _ => Ok(crate::string::JsString::from(crate::vm::to_string(
+            realm,
+            this.clone(),
+        )?)),
     }
 }
 
@@ -290,6 +299,7 @@ pub(crate) fn bound_function(
         lexical_this: None,
         instance_init: None,
         has_super: false,
+        prototype: std::cell::RefCell::new(None),
     });
     JsValue::Object(realm.function_object(function))
 }

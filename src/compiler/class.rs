@@ -34,8 +34,12 @@ impl Compiler {
                 }
             };
             let is_constructor = !element.is_static && element.kind_is_constructor(&method_name);
-            let compiled =
-                self.compile_function(function, is_constructor, class.super_class.is_some())?;
+            let compiled = self.compile_function(
+                function,
+                is_constructor,
+                class.super_class.is_some(),
+                false,
+            )?;
             if is_constructor {
                 constructor = Some(compiled);
             } else {
@@ -70,6 +74,7 @@ impl Compiler {
                 strict: true,
                 is_class_fields: false,
                 source: self.source_name.clone(),
+                name_atom: std::cell::RefCell::new(None),
             }));
         }
         let instance_init = self.compile_field_initializer(&instance_fields)?;

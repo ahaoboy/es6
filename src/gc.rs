@@ -327,6 +327,9 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                 value(argument, visit);
             }
         }
+        if let Some(prototype) = &*function.prototype.borrow() {
+            visit(&Entity::Object(Rc::downgrade(prototype)));
+        }
         if let Some(this) = &function.lexical_this {
             value(this, visit);
         }
@@ -431,13 +434,13 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                 }
                 ObjectKind::Map(entries) => {
                     for (key, value_item) in entries {
-                        value(key, visit);
+                        value(&key.0, visit);
                         value(value_item, visit);
                     }
                 }
                 ObjectKind::Set(values) => {
                     for item in values {
-                        value(item, visit);
+                        value(&item.0, visit);
                     }
                 }
                 // Weak collections: only entries whose key is still alive

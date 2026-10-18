@@ -150,7 +150,10 @@ fn at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsVa
 
 fn index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let search = crate::vm::to_string(realm, arg(arguments, 0))?;
+    let search = match arg(arguments, 0) {
+        JsValue::String(text) => text,
+        other => crate::string::JsString::from(crate::vm::to_string(realm, other)?),
+    };
     let start = to_integer(arg_number_or(realm, arguments, 1, 0.0)?).max(0);
     if start as usize > crate::coerce::utf16_length(&value) {
         return Ok(JsValue::number(-1.0));
@@ -158,7 +161,7 @@ fn index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
     let start_byte = utf16_to_byte_offset(&value, start as usize);
     Ok(JsValue::number(
         value[start_byte..]
-            .find(&search)
+            .find(search.as_str())
             .map(|index| byte_to_utf16_offset(&value, start_byte + index))
             .map(|index| index as f64)
             .unwrap_or(-1.0),
@@ -167,7 +170,10 @@ fn index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
 
 fn last_index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let search = crate::vm::to_string(realm, arg(arguments, 0))?;
+    let search = match arg(arguments, 0) {
+        JsValue::String(text) => text,
+        other => crate::string::JsString::from(crate::vm::to_string(realm, other)?),
+    };
     let units = crate::coerce::utf16_length(&value);
     let end = if arguments.len() > 1 {
         to_integer(arg_number(realm, arguments, 1)?).clamp(0, i64::MAX)
@@ -177,7 +183,7 @@ fn last_index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> Js
     let end_byte = utf16_to_byte_offset(&value, end.min(units));
     Ok(JsValue::number(
         value[..end_byte]
-            .rfind(&search)
+            .rfind(search.as_str())
             .map(|index| byte_to_utf16_offset(&value, index) as f64)
             .unwrap_or(-1.0),
     ))
@@ -185,27 +191,38 @@ fn last_index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> Js
 
 fn includes(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let search = crate::vm::to_string(realm, arg(arguments, 0))?;
+    let search = match arg(arguments, 0) {
+        JsValue::String(text) => text,
+        other => crate::string::JsString::from(crate::vm::to_string(realm, other)?),
+    };
     let start = to_integer(arg_number_or(realm, arguments, 1, 0.0)?).max(0) as usize;
     let start_byte = utf16_to_byte_offset(&value, start);
     Ok(JsValue::Bool(
-        start <= crate::coerce::utf16_length(&value) && value[start_byte..].contains(&search),
+        start <= crate::coerce::utf16_length(&value)
+            && value[start_byte..].contains(search.as_str()),
     ))
 }
 
 fn starts_with(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let search = crate::vm::to_string(realm, arg(arguments, 0))?;
+    let search = match arg(arguments, 0) {
+        JsValue::String(text) => text,
+        other => crate::string::JsString::from(crate::vm::to_string(realm, other)?),
+    };
     let start = to_integer(arg_number_or(realm, arguments, 1, 0.0)?).max(0) as usize;
     let start_byte = utf16_to_byte_offset(&value, start);
     Ok(JsValue::Bool(
-        start <= crate::coerce::utf16_length(&value) && value[start_byte..].starts_with(&search),
+        start <= crate::coerce::utf16_length(&value)
+            && value[start_byte..].starts_with(search.as_str()),
     ))
 }
 
 fn ends_with(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let search = crate::vm::to_string(realm, arg(arguments, 0))?;
+    let search = match arg(arguments, 0) {
+        JsValue::String(text) => text,
+        other => crate::string::JsString::from(crate::vm::to_string(realm, other)?),
+    };
     let units = crate::coerce::utf16_length(&value);
     let end = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
         to_integer(arg_number(realm, arguments, 1)?).clamp(0, units as i64) as usize
@@ -213,7 +230,7 @@ fn ends_with(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
         units
     };
     let end_byte = utf16_to_byte_offset(&value, end);
-    Ok(JsValue::Bool(value[..end_byte].ends_with(&search)))
+    Ok(JsValue::Bool(value[..end_byte].ends_with(search.as_str())))
 }
 
 fn slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
@@ -310,7 +327,7 @@ fn is_ecma_whitespace(ch: char) -> bool {
 }
 
 fn concat(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let mut result = this_string(realm, this)?;
+    let mut result = this_string(realm, this)?.as_str().to_owned();
     for argument in arguments {
         result.push_str(&crate::vm::to_string(realm, argument.clone())?);
     }
@@ -362,9 +379,9 @@ fn pad(realm: &mut Realm, this: &JsValue, arguments: &[JsValue], start: bool) ->
     }
     let padding = String::from_utf16_lossy(&padding);
     Ok(JsValue::string(if start {
-        padding + &value
+        padding + value.as_str()
     } else {
-        value + &padding
+        value.as_str().to_owned() + &padding
     }))
 }
 

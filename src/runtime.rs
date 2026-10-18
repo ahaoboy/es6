@@ -465,6 +465,7 @@ impl Realm {
             lexical_this: None,
             instance_init: None,
             has_super: false,
+            prototype: std::cell::RefCell::new(None),
         });
         JsValue::Object(self.function_object(function))
     }
@@ -488,7 +489,10 @@ impl Realm {
             data.define(
                 "name",
                 crate::object::Property {
-                    value: JsValue::string(function.name.to_string()),
+                    value: match &function.def {
+                        Some(def) => JsValue::String(def.name_atom()),
+                        None => JsValue::string(function.name.to_string()),
+                    },
                     get: None,
                     set: None,
                     writable: false,
@@ -516,7 +520,22 @@ impl Realm {
         instance_init: Option<Rc<FunctionDef>>,
         has_super: bool,
     ) -> JsValue {
-        self.make_js_function_inner_with_super(def, env, None, instance_init, has_super)
+        // Class wiring immediately reads `.prototype`, so build it eagerly.
+        let value =
+            self.make_js_function_inner_with_super(def, env, None, instance_init, has_super);
+        let function = match &value {
+            JsValue::Object(object) => match &object.borrow().kind {
+                crate::object::ObjectKind::Function(function) => {
+                    Some((object.clone(), function.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((object, function)) = function {
+            self.function_prototype(&object, &function);
+        }
+        value
     }
 
     fn make_js_function_inner(
@@ -540,7 +559,6 @@ impl Realm {
         let name = def.name.clone();
         let length = def.length;
         let is_arrow = def.is_arrow;
-        let constructable = !is_arrow && !def.is_async && !def.is_generator;
         let lexical_this = if is_arrow { this } else { None };
         let function = Rc::new(JsFunction {
             name,
@@ -554,27 +572,38 @@ impl Realm {
             lexical_this,
             instance_init,
             has_super,
+            prototype: std::cell::RefCell::new(None),
         });
         let object = self.function_object(function);
-        if constructable {
-            let prototype = self.object();
-            prototype.borrow_mut().define(
-                "constructor",
-                crate::object::Property::hidden(JsValue::Object(object.clone())),
-            );
-            object.borrow_mut().define(
-                "prototype",
-                crate::object::Property {
-                    value: JsValue::Object(prototype),
-                    get: None,
-                    set: None,
-                    writable: true,
-                    enumerable: false,
-                    configurable: true,
-                },
-            );
-        }
+        // `.prototype` is created on first access (`Realm::function_prototype`),
+        // like engines that lazily materialize it.
         JsValue::Object(object)
+    }
+
+    /// Materialize a constructable function's `.prototype` object on demand
+    /// and answer the value (ES2022 10.2.5).
+    pub fn function_prototype(&self, object: &ObjRef, function: &JsFunction) -> JsValue {
+        if let Some(prototype) = function.prototype.borrow().clone() {
+            return JsValue::Object(prototype);
+        }
+        let prototype = self.object();
+        prototype.borrow_mut().define(
+            "constructor",
+            crate::object::Property::hidden(JsValue::Object(object.clone())),
+        );
+        *function.prototype.borrow_mut() = Some(prototype.clone());
+        object.borrow_mut().define(
+            "prototype",
+            crate::object::Property {
+                value: JsValue::Object(prototype.clone()),
+                get: None,
+                set: None,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+            },
+        );
+        JsValue::Object(prototype)
     }
 
     pub fn error_prototype(&self, name: &str) -> ObjRef {

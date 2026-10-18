@@ -24,7 +24,10 @@ pub fn iterable_items(realm: &mut Realm, value: JsValue) -> JsResult<Vec<JsValue
                 return Ok(items.clone());
             }
             if let ObjectKind::Map(entries) = &data.kind {
-                let entries = entries.clone();
+                let entries: Vec<(JsValue, JsValue)> = entries
+                    .iter()
+                    .map(|(key, value)| (key.0.clone(), value.clone()))
+                    .collect();
                 drop(data);
                 return Ok(entries
                     .into_iter()
@@ -32,7 +35,7 @@ pub fn iterable_items(realm: &mut Realm, value: JsValue) -> JsResult<Vec<JsValue
                     .collect());
             }
             if let ObjectKind::Set(values) = &data.kind {
-                return Ok(values.clone());
+                return Ok(values.iter().map(|key| key.0.clone()).collect());
             }
             if let ObjectKind::TypedArray(values) = &data.kind {
                 return Ok(values.values());

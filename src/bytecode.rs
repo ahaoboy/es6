@@ -64,9 +64,21 @@ pub struct FunctionDef {
     /// function names.
     pub is_class_fields: bool,
     pub source: String,
+    /// Lazily built `name` property atom: every closure creation would
+    /// otherwise allocate a fresh string for the same bytecode name.
+    pub name_atom: RefCell<Option<crate::string::JsString>>,
 }
 
 impl FunctionDef {
+    /// The cached `name` atom for this function's `.name` property.
+    pub fn name_atom(&self) -> crate::string::JsString {
+        if let Some(atom) = &*self.name_atom.borrow() {
+            return atom.clone();
+        }
+        let atom = crate::string::JsString::from(self.name.as_ref());
+        *self.name_atom.borrow_mut() = Some(atom.clone());
+        atom
+    }
     /// Shared placeholder used by recycled activation records.
     pub fn empty() -> Rc<Self> {
         thread_local! {
@@ -85,6 +97,7 @@ impl FunctionDef {
                 strict: false,
                 is_class_fields: false,
                 source: String::new(),
+                name_atom: RefCell::new(None),
             });
         }
         EMPTY.with(|empty| empty.clone())
@@ -121,8 +134,50 @@ pub enum Op {
     Swap,
 
     LoadArg(u16),
+    /// `arg -> local slot` in one dispatch, used for simple parameters.
+    LoadArgInto {
+        arg: u16,
+        depth: u16,
+        slot: u16,
+    },
     RestArgs(u16),
     Arguments,
+    /// `local.prop` — fuses `GetVar`/`This` with a cached constant get.
+    GetVarPropConst {
+        depth: u16,
+        slot: u16,
+        key: u32,
+        cache: u32,
+    },
+    GetThisPropConst {
+        key: u32,
+        cache: u32,
+    },
+    /// `local.prop = value` — the value is on the stack; pushes it back.
+    SetVarPropConstKeep {
+        depth: u16,
+        slot: u16,
+        key: u32,
+        cache: u32,
+    },
+    SetThisPropConstKeep {
+        key: u32,
+        cache: u32,
+    },
+    /// `local.method(args)` / `this.method(args)` with cached constant key;
+    /// arguments are on the stack.
+    CallVarMethodConst {
+        depth: u16,
+        slot: u16,
+        key: u32,
+        cache: u32,
+        argc: u16,
+    },
+    CallThisMethodConst {
+        key: u32,
+        cache: u32,
+        argc: u16,
+    },
     GetVar {
         depth: u16,
         slot: u16,
@@ -186,6 +241,10 @@ pub enum Op {
     NewObjectFrom {
         keys: u32,
         count: u16,
+        /// Per-site property-map template cache, so repeated evaluation of
+        /// the literal clones a prepared map instead of re-hashing each key
+        /// (QuickJS reuses a shape the same way).
+        cache: u32,
     },
     NewArray(u32),
     ArrayPush,

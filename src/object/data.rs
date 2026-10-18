@@ -3,6 +3,9 @@
 //! QuickJS `JSObject` (quickjs.c:1125).
 
 use super::*;
+use indexmap::{IndexMap, IndexSet};
+use std::hash::Hash;
+use std::rc::Rc;
 
 #[derive(Clone)]
 pub struct ArrayData {
@@ -176,6 +179,24 @@ pub struct JsFunction {
     /// True for a derived class constructor: its field initializer runs after
     /// `super()`, not before the constructor body.
     pub has_super: bool,
+    /// Lazily created `.prototype` object. QuickJS materializes the prototype
+    /// when the function object is built; most closures are never used as
+    /// constructors, so creating it on first access removes an allocation and
+    /// two property insertions from every closure creation.
+    pub prototype: RefCell<Option<ObjRef>>,
+}
+
+impl JsFunction {
+    /// Whether this function can carry a `.prototype` object
+    /// (ES2022 10.2.5 `MakeConstructor` applies to normal functions).
+    pub fn is_constructable(&self) -> bool {
+        self.bound.is_none()
+            && self.native_data.is_none()
+            && self
+                .def
+                .as_ref()
+                .is_some_and(|def| !def.is_arrow && !def.is_async && !def.is_generator)
+    }
 }
 
 #[derive(Clone)]
@@ -203,6 +224,7 @@ impl JsFunction {
             lexical_this: None,
             instance_init: None,
             has_super: false,
+            prototype: RefCell::new(None),
         }
     }
 
@@ -228,6 +250,67 @@ pub enum ResolvedProperty {
 /// Object kinds. The `Frame`-carrying arms hold QuickJS-internal suspended
 /// activations; the `private_interfaces` allowance keeps the frame type
 /// crate-internal while the kind enum stays public.
+#[allow(private_interfaces)]
+/// Hashable value with SameValueZero semantics (ES2022 7.2.11), used as the
+/// `Map`/`Set` key: `-0` and `0` collide, all NaNs collide, objects compare
+/// by identity, strings by content.
+#[derive(Clone)]
+pub struct MapKey(pub JsValue);
+
+fn canonical_number_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
+
+impl std::hash::Hash for MapKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match &self.0 {
+            JsValue::Undefined => 0u8.hash(state),
+            JsValue::Null => 1u8.hash(state),
+            JsValue::Bool(value) => {
+                2u8.hash(state);
+                value.hash(state);
+            }
+            JsValue::Int(value) => {
+                3u8.hash(state);
+                canonical_number_bits(*value as f64).hash(state);
+            }
+            JsValue::Float(value) => {
+                3u8.hash(state);
+                canonical_number_bits(*value).hash(state);
+            }
+            JsValue::String(value) => {
+                4u8.hash(state);
+                value.hash(state);
+            }
+            JsValue::Symbol(value) => {
+                5u8.hash(state);
+                value.hash(state);
+            }
+            JsValue::Object(value) => {
+                6u8.hash(state);
+                (Rc::as_ptr(value) as usize).hash(state);
+            }
+        }
+    }
+}
+
+impl PartialEq for MapKey {
+    fn eq(&self, other: &Self) -> bool {
+        crate::coerce::same_value_zero(&self.0, &other.0)
+    }
+}
+
+impl Eq for MapKey {}
+
+pub type MapMap = IndexMap<MapKey, JsValue, FxBuildHasher>;
+pub type SetSet = IndexSet<MapKey, FxBuildHasher>;
+
 #[allow(private_interfaces)]
 pub enum ObjectKind {
     Ordinary,
@@ -255,8 +338,8 @@ pub enum ObjectKind {
         text: crate::string::JsString,
         index: usize,
     },
-    Map(Vec<(JsValue, JsValue)>),
-    Set(Vec<JsValue>),
+    Map(MapMap),
+    Set(SetSet),
     /// Weak collections: entries die with their keys (ES2022 25.3/25.4).
     /// Keys are weak references, so the GC prunes dead entries; values stay
     /// strongly held while the key lives, like QuickJS' weak ref lists.

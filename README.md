@@ -81,6 +81,37 @@ and property reads with inline caches. Strings are thin reference-counted
 values so every JS value stays at 16 bytes, and the release profile enables
 fat LTO with a single codegen unit.
 
+Additional hot-path work:
+
+- One fused dispatch switch (the QuickJS `JS_CallInternal` shape) with the
+  program counter and bytecode slice held in locals; splitting the dispatch
+  into a "hot" pre-pass and a second full match measurably hurt and was
+  removed.
+- Superinstructions for the dominant patterns: fused comparison/branch and
+  loop heads (`ForNext*`), fused `local.prop` reads and writes, fused
+  `local.method(args)` / `this.method(args)` calls, fused parameter binding,
+  and declared-function calls skip the per-call self-name binding.
+- `for (let ...)` and `for (const ... of ...)` bindings are only materialized
+  per iteration when a nested function can observe them (a static
+  over-approximation of QuickJS' `JSVarDef.is_captured` resolution), so the
+  common loop compiles to the same fused shape as a `var` loop.
+- Property inline caches carry the per-site canonical key and a prepared
+  object-literal property map, so repeated literal evaluation does not
+  re-hash or re-parse keys; `.prototype` is created lazily and function
+  names reuse a per-bytecode atom.
+- `Map`/`Set` are insertion-ordered hash tables with SameValueZero keys
+  (linear scanning was quadratic before), and primitive string receivers no
+  longer allocate a temporary wrapper object per property access.
+
+Measured with the micro-kernels in this repository against qjs-ng on the
+same machine: integer loops are ~1.2x QuickJS, fused property access ~2x,
+`Map`/`Set` and exception handling are faster than QuickJS, and regexp
+execution is at parity. The remaining gap is concentrated in capturing
+closures: today every local of a capturing function lives in its
+environment frame, while QuickJS boxes only captured variables
+(`JSVarDef.is_captured`); per-variable capture tracking is the next step for
+full parity.
+
 Deep recursion is bounded by `Context::set_max_call_depth` (a `RangeError`
 like QuickJS' stack limit); the CLI runs the engine on a 64 MB stack.
 

@@ -2,10 +2,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::*;
-use crate::object::{ObjectData, ObjectKind};
+use crate::object::{MapKey, ObjectData, ObjectKind};
 use crate::value::JsValue;
 
-// QuickJS: JS_AddIntrinsicMapSet / js_set_* (quickjs.c).
+// QuickJS: JS_AddIntrinsicMapSet / js_set_* (quickjs.c). Values use
+// SameValueZero hashing, giving O(1) membership and insertion-order
+// iteration.
 pub fn install(realm: &mut Realm) {
     let prototype = realm.set_proto.clone();
     install_constructor(realm, "Set", 0, constructor, &prototype);
@@ -32,19 +34,14 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
         let values = crate::vm::iterable_items(realm, iterable)?;
         if let ObjectKind::Set(set) = &mut object.borrow_mut().kind {
             for value in values {
-                if !set
-                    .iter()
-                    .any(|existing| crate::vm::same_value_zero(existing, &value))
-                {
-                    set.push(value);
-                }
+                set.insert(MapKey(value));
             }
         }
     }
     Ok(JsValue::Object(object))
 }
 
-fn with_set(realm: &Realm, this: &JsValue) -> JsResult<crate::object::ObjRef> {
+fn with_set(realm: &Realm, this: &JsValue) -> JsResult<Rc<RefCell<ObjectData>>> {
     let object = this
         .as_object()
         .ok_or_else(|| realm.type_error("Set method called on incompatible receiver"))?;
@@ -57,43 +54,31 @@ fn with_set(realm: &Realm, this: &JsValue) -> JsResult<crate::object::ObjRef> {
 }
 
 fn add(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = arg(arguments, 0);
     let object = with_set(realm, this)?;
     let mut data = object.borrow_mut();
-    if let ObjectKind::Set(values) = &mut data.kind
-        && !values
-            .iter()
-            .any(|existing| crate::vm::same_value_zero(existing, &value))
-    {
-        values.push(value);
+    if let ObjectKind::Set(values) = &mut data.kind {
+        values.insert(MapKey(arg(arguments, 0)));
     }
+    drop(data);
     Ok(this.clone())
 }
 
 fn has(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = arg(arguments, 0);
     let object = with_set(realm, this)?;
     let data = object.borrow();
     if let ObjectKind::Set(values) = &data.kind {
-        Ok(JsValue::Bool(values.iter().any(|existing| {
-            crate::vm::same_value_zero(existing, &value)
-        })))
-    } else {
-        Ok(JsValue::Bool(false))
+        return Ok(JsValue::Bool(values.contains(&MapKey(arg(arguments, 0)))));
     }
+    Ok(JsValue::Bool(false))
 }
 
 fn delete(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = arg(arguments, 0);
     let object = with_set(realm, this)?;
     let mut data = object.borrow_mut();
-    if let ObjectKind::Set(values) = &mut data.kind
-        && let Some(index) = values
-            .iter()
-            .position(|existing| crate::vm::same_value_zero(existing, &value))
-    {
-        values.remove(index);
-        return Ok(JsValue::Bool(true));
+    if let ObjectKind::Set(values) = &mut data.kind {
+        return Ok(JsValue::Bool(
+            values.shift_remove(&MapKey(arg(arguments, 0))),
+        ));
     }
     Ok(JsValue::Bool(false))
 }
@@ -110,11 +95,11 @@ fn clear(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<
 fn for_each(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let callback = arg(arguments, 0);
     let this_arg = arg(arguments, 1);
-    let values = {
+    let values: Vec<JsValue> = {
         let object = with_set(realm, this)?;
         let data = object.borrow();
         match &data.kind {
-            ObjectKind::Set(values) => values.clone(),
+            ObjectKind::Set(values) => values.iter().map(|key| key.0.clone()).collect(),
             _ => Vec::new(),
         }
     };
@@ -131,23 +116,27 @@ fn for_each(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
 
 fn values(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = with_set(realm, this)?;
-    let data = object.borrow();
-    let values = match &data.kind {
-        ObjectKind::Set(values) => values.clone(),
-        _ => Vec::new(),
+    let values: Vec<JsValue> = {
+        let data = object.borrow();
+        match &data.kind {
+            ObjectKind::Set(values) => values.iter().map(|key| key.0.clone()).collect(),
+            _ => Vec::new(),
+        }
     };
     Ok(JsValue::Object(realm.iterator(values)))
 }
 
 fn entries(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = with_set(realm, this)?;
-    let data = object.borrow();
-    let entries = match &data.kind {
-        ObjectKind::Set(values) => values
-            .iter()
-            .map(|value| JsValue::Object(realm.array(vec![value.clone(), value.clone()])))
-            .collect(),
-        _ => Vec::new(),
+    let entries: Vec<JsValue> = {
+        let data = object.borrow();
+        match &data.kind {
+            ObjectKind::Set(values) => values
+                .iter()
+                .map(|key| JsValue::Object(realm.array(vec![key.0.clone(), key.0.clone()])))
+                .collect(),
+            _ => Vec::new(),
+        }
     };
     Ok(JsValue::Object(realm.iterator(entries)))
 }
