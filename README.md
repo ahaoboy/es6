@@ -108,7 +108,14 @@ Additional hot-path work:
 - Property inline caches carry the per-site canonical key and a prepared
   object-literal layout, so repeated literal evaluation does not re-hash or
   re-parse keys; `.prototype` is created lazily and function names reuse a
-  per-bytecode atom.
+  per-bytecode atom. Each site keeps up to four recent shapes (own slots, or
+  receiver shapes sharing the cached prototype holder), matching the
+  polymorphism of real object graphs instead of thrashing a single entry.
+  Constructor field writes reuse the interned shape transition and slot
+  cached on first insertion.
+- Strings are ASCII-fast: `length`, `charAt`, `charCodeAt`, `substring`,
+  `slice`, `substr` and `String.fromCharCode` avoid the UTF-16
+  encode/decode round trip for the overwhelmingly common ASCII case.
 - The call path avoids redundant reference traffic: the common bytecode
   call does not clone the `JsFunction` handle, the callee's `this` is
   resolved lazily (sloppy calls that never read it skip the global object),
@@ -121,12 +128,16 @@ Additional hot-path work:
   longer allocate a temporary wrapper object per property access.
 
 Measured with the micro-kernels in this repository against qjs-ng on the
-same machine (pinned to one core): integer loops are ~1.3x QuickJS, fused
-property access ~1.8x, object allocation ~1.7x, a one-argument call ~3.2x,
-and `Map`/`Set` and exception handling are faster than QuickJS; regexp
-execution is at parity. The remaining gap is dominated by the opcode
-dispatch loop rather than by frame allocation or property layout: recursive
-call micro-benchmarks spend most of their time in per-opcode dispatch.
+same machine (pinned to one core): integer loops are ~1.3x QuickJS, own
+property access ~1.65x, prototype property access ~1.75x, object allocation
+~2x, a one-argument call ~2x, and `Map`/`Set` and exception handling are
+faster than QuickJS; regexp execution is at parity. The V8 benchmark suite
+runs at roughly 0.4 of qjs-ng's score. The remaining gap is dominated by
+the opcode dispatch loop and the reference-counted `Rc<RefCell>` value
+model rather than by frame allocation or property layout: complex
+expressions cost 2.5-3.8x while a plain increment loop is only 1.3x, and
+recursive call micro-benchmarks are ~6x because every opcode pays a `match`
+dispatch and `Result` return.
 
 Deep recursion is bounded by `Context::set_max_call_depth` (a `RangeError`
 like QuickJS' stack limit); the CLI runs the engine on a 64 MB stack.
