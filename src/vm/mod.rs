@@ -52,6 +52,13 @@ pub(crate) enum Job {
         completion: ObjRef,
         result: JsResult<JsValue>,
     },
+    /// PromiseResolveThenableJob (ES2022 27.2.1.3.2): adopt a foreign
+    /// thenable by calling its `then` from the job queue.
+    Thenable {
+        promise: ObjRef,
+        thenable: JsValue,
+        then: JsValue,
+    },
 }
 
 thread_local! {
@@ -167,9 +174,10 @@ fn run_loop(
                         Err(error) => return (Err(error), Some(frame)),
                     }
                 };
-                let suspended: SuspendedFrame = Rc::new(RefCell::new(Some(frame)));
-                if let Err(error) =
-                    crate::promise::await_value(realm, value, suspended, completion)
+                // The frame moves into the async-frame object owned by the
+                // promise reaction data, mirroring `JSStackFrame.cur_gc_obj`
+                // (quickjs.c:442).
+                if let Err(error) = crate::promise::await_value(realm, value, frame, completion)
                 {
                     return (Err(error), None);
                 }
@@ -223,6 +231,122 @@ fn await_sync(_realm: &mut Realm, value: JsValue) -> JsResult<JsValue> {
     }
 }
 
+/// PromiseResolveThenableJob: call `then(thenable)` with resolve/reject
+/// element functions that settle the promise exactly once
+/// (ES2022 27.2.1.3.2). The shared once-only flag lives in a record object
+/// held by the data cell, so it is mutable and GC-visible, exactly like
+/// QuickJS' shared `JSFuncData` for thenable adoption.
+fn run_thenable_job(realm: &mut Realm, promise: ObjRef, thenable: JsValue, then: JsValue) {
+    use crate::object::NativeData;
+    let record = realm.object();
+    {
+        let mut data = record.borrow_mut();
+        data.define(
+            "promise",
+            crate::object::Property::data(JsValue::Object(promise.clone())),
+        );
+        data.define(
+            "called",
+            crate::object::Property::data(JsValue::Bool(false)),
+        );
+    }
+    let data: NativeData = Rc::new(RefCell::new(vec![JsValue::Object(record)]));
+    let resolve_function =
+        realm.native_function_data("", 1, data.clone(), thenable_resolve_element);
+    let reject_function =
+        realm.native_function_data("", 1, data.clone(), thenable_reject_element);
+    if let Err(error) = crate::vm::call_value(
+        realm,
+        then,
+        thenable,
+        &[resolve_function, reject_function],
+    ) {
+        // The `then` call threw before settling: reject the promise unless
+        // one of the element functions already ran.
+        let (promise, called) = thenable_record(realm, &data);
+        if !called {
+            let _ = crate::promise::reject(realm, &promise, error);
+        }
+    }
+}
+
+/// `(promise, called)` snapshot of a thenable adoption record.
+fn thenable_record(realm: &mut Realm, data: &crate::object::NativeData) -> (ObjRef, bool) {
+    let cell = data.borrow();
+    let record = cell
+        .first()
+        .and_then(JsValue::as_object)
+        .map(|object| object.into_ref());
+    let Some(record) = record else {
+        let promise = realm.promise();
+        return (promise, true);
+    };
+    let promise = record
+        .borrow()
+        .get_own_value(&crate::object::PropKey::from("promise"))
+        .and_then(|value| value.as_object())
+        .map(|object| object.into_ref())
+        .unwrap_or_else(|| realm.promise());
+    let called = record
+        .borrow()
+        .get_own_value(&crate::object::PropKey::from("called"))
+        .as_ref()
+        .map(crate::vm::to_boolean)
+        .unwrap_or(false);
+    (promise, called)
+}
+
+/// Mark the record consumed; `Ok(Some(promise))` when this call settles.
+fn thenable_claim(realm: &Realm, data: &[JsValue]) -> Option<ObjRef> {
+    let record = data
+        .first()
+        .and_then(JsValue::as_object)
+        .map(|object| object.into_ref())?;
+    let promise = record
+        .borrow()
+        .get_own_value(&crate::object::PropKey::from("promise"))
+        .and_then(|value| value.as_object())
+        .map(|object| object.into_ref());
+    let called = record
+        .borrow()
+        .get_own_value(&crate::object::PropKey::from("called"))
+        .as_ref()
+        .map(crate::vm::to_boolean)
+        .unwrap_or(false);
+    if called {
+        return None;
+    }
+    record
+        .borrow_mut()
+        .define("called", crate::object::Property::data(JsValue::Bool(true)));
+    let _ = realm;
+    promise
+}
+
+fn thenable_resolve_element(
+    realm: &mut Realm,
+    _this: &JsValue,
+    arguments: &[JsValue],
+    data: &[JsValue],
+) -> JsResult<JsValue> {
+    if let Some(promise) = thenable_claim(realm, data) {
+        crate::promise::resolve(realm, &promise, crate::builtins::arg(arguments, 0))?;
+    }
+    Ok(JsValue::Undefined)
+}
+
+fn thenable_reject_element(
+    realm: &mut Realm,
+    _this: &JsValue,
+    arguments: &[JsValue],
+    data: &[JsValue],
+) -> JsResult<JsValue> {
+    if let Some(promise) = thenable_claim(realm, data) {
+        crate::promise::reject(realm, &promise, crate::builtins::arg(arguments, 0))?;
+    }
+    Ok(JsValue::Undefined)
+}
+
 /// Run one queued job, like `JS_ExecutePendingJob` (quickjs.c:2525).
 pub(crate) fn run_job(realm: &mut Realm, job: Job) -> JsResult<()> {
     match job {
@@ -232,6 +356,14 @@ pub(crate) fn run_job(realm: &mut Realm, job: Job) -> JsResult<()> {
             value,
         } => {
             crate::promise::reaction(realm, reaction, state, value);
+            Ok(())
+        }
+        Job::Thenable {
+            promise,
+            thenable,
+            then,
+        } => {
+            run_thenable_job(realm, promise, thenable, then);
             Ok(())
         }
         Job::Resume {

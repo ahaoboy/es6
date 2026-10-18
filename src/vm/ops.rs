@@ -542,7 +542,7 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         }
         Op::Div => binary_number(realm, frame, |a, b| a / b)?,
         Op::Mod => binary_number(realm, frame, |a, b| a % b)?,
-        Op::Exp => binary_number(realm, frame, |a, b| a.powf(b))?,
+        Op::Exp => binary_number(realm, frame, crate::coerce::js_pow)?,
         Op::BitAnd => binary_int(realm, frame, |a, b| a & b)?,
         Op::BitOr => binary_int(realm, frame, |a, b| a | b)?,
         Op::BitXor => binary_int(realm, frame, |a, b| a ^ b)?,
@@ -590,9 +590,17 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         Op::In => {
             let object = pop(&mut frame.stack)?;
             let key = pop_property_key(realm, &mut frame.stack)?;
-            let result = match object {
+            // `in` on a primitive boxes it, like ToObject in ES2022 13.10.2.
+            let result = match &object {
                 JsValue::Object(object) => object.borrow().has_property(&key),
-                _ => return Err(realm.type_error("Right-hand side of 'in' is not an object")),
+                JsValue::String(text) => match &key {
+                    PropKey::Str(name) if name.as_ref() == "length" => true,
+                    PropKey::Str(name) => crate::object::key_to_index(name)
+                        .is_some_and(|index| index < crate::object::utf16_len(text)),
+                    PropKey::Index(index) => *index < crate::object::utf16_len(text),
+                    _ => false,
+                },
+                _ => false,
             };
             frame.stack.push(JsValue::Bool(result));
         }

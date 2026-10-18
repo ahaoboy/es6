@@ -627,6 +627,15 @@ pub(crate) fn instance_of(
     Ok(false)
 }
 
+/// ECMAScript `Number::exponentiate` (ES2022 13.5.3), differing from C99
+/// `pow`: `±1 ** ±Infinity` is NaN.
+pub fn js_pow(base: f64, exponent: f64) -> f64 {
+    if exponent.is_infinite() && base.abs() == 1.0 {
+        return f64::NAN;
+    }
+    base.powf(exponent)
+}
+
 pub fn to_int32(value: f64) -> i32 {
     if !value.is_finite() || value == 0.0 {
         return 0;

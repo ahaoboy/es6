@@ -96,12 +96,12 @@ fn constructor(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsRe
         }
     } else {
         let year = arg_number(realm, arguments, 0)?;
-        let month = arg_number(realm, arguments, 1).unwrap_or(0.0);
-        let date = arg_number(realm, arguments, 2).unwrap_or(1.0);
-        let hours = arg_number(realm, arguments, 3).unwrap_or(0.0);
-        let minutes = arg_number(realm, arguments, 4).unwrap_or(0.0);
-        let seconds = arg_number(realm, arguments, 5).unwrap_or(0.0);
-        let milliseconds = arg_number(realm, arguments, 6).unwrap_or(0.0);
+        let month = arg_number_or(realm, arguments, 1, 0.0)?;
+        let date = arg_number_or(realm, arguments, 2, 1.0)?;
+        let hours = arg_number_or(realm, arguments, 3, 0.0)?;
+        let minutes = arg_number_or(realm, arguments, 4, 0.0)?;
+        let seconds = arg_number_or(realm, arguments, 5, 0.0)?;
+        let milliseconds = arg_number_or(realm, arguments, 6, 0.0)?;
         make_date(year, month, date, hours, minutes, seconds, milliseconds)
     };
     let object = ObjectData::date(value, Some(realm.date_proto.clone()));
@@ -271,10 +271,10 @@ fn weekday_of(value: f64) -> usize {
 /// Days since the epoch for a (year, month, day), like `MakeDay`
 /// (ES2022 20.4.1.12). This is Howard Hinnant's `days_from_civil`.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = year + if month <= 1 { 1 } else { 0 };
+    let y = year - if month <= 1 { 1 } else { 0 };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
-    // `month` is 0-based; March is month 0 of the shifted year.
+    // `month` is 0-based; March opens the shifted year.
     let mp = if month <= 1 { month + 10 } else { month - 2 };
     let doy = (153 * mp + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
@@ -540,7 +540,9 @@ fn parse(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<
 fn parse_date(value: &str) -> f64 {
     let value = crate::coerce::trim_ecma_whitespace(value);
     let Some((date_part, time_part)) = value.split_once(['T', 't']) else {
-        return parse_date_only(value).map(f64::from).unwrap_or(f64::NAN);
+        return parse_date_only(value)
+            .map(|day| day * DAY_MS)
+            .unwrap_or(f64::NAN);
     };
     let date_part = parse_date_only(date_part);
     let time_part = parse_time(time_part);
@@ -612,12 +614,12 @@ fn utc(
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
     let year = arg_number(realm, arguments, 0)?;
-    let month = arg_number(realm, arguments, 1).unwrap_or(0.0);
-    let day = arg_number(realm, arguments, 2).unwrap_or(1.0);
-    let hours = arg_number(realm, arguments, 3).unwrap_or(0.0);
-    let minutes = arg_number(realm, arguments, 4).unwrap_or(0.0);
-    let seconds = arg_number(realm, arguments, 5).unwrap_or(0.0);
-    let milliseconds = arg_number(realm, arguments, 6).unwrap_or(0.0);
+    let month = arg_number_or(realm, arguments, 1, 0.0)?;
+    let day = arg_number_or(realm, arguments, 2, 1.0)?;
+    let hours = arg_number_or(realm, arguments, 3, 0.0)?;
+    let minutes = arg_number_or(realm, arguments, 4, 0.0)?;
+    let seconds = arg_number_or(realm, arguments, 5, 0.0)?;
+    let milliseconds = arg_number_or(realm, arguments, 6, 0.0)?;
     Ok(JsValue::number(make_date(
         year, month, day, hours, minutes, seconds, milliseconds,
     )))

@@ -153,8 +153,12 @@ fn splice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
     let mut items = array_items(realm, &object)?;
     let length = items.len();
     let start = normalize_index(arg_number(realm, arguments, 0)?, length);
-    let delete_count = if arguments.len() < 2 {
-        length.saturating_sub(start)
+    // deleteCount defaults to `len - start` only with exactly one argument
+    // (ES2022 23.1.3.26); with no arguments nothing is removed.
+    let delete_count = if arguments.is_empty() {
+        0
+    } else if arguments.len() == 1 {
+        length - start
     } else {
         (arg_number(realm, arguments, 1)?.max(0.0) as usize).min(length - start)
     };
@@ -228,8 +232,10 @@ fn last_index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> Js
     } else {
         items.len().saturating_sub(1)
     };
-    for index in (0..=start.min(items.len().saturating_sub(1))).rev() {
-        if crate::vm::strict_equals(&items[index], &target) {
+    for index in (0..=start).rev() {
+        if let Some(item) = items.get(index)
+            && crate::vm::strict_equals(item, &target)
+        {
             return Ok(JsValue::number(index as f64));
         }
     }
@@ -451,6 +457,13 @@ fn sort(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
     let object = array_object(realm, this)?;
     let mut items = array_items(realm, &object)?;
     let comparator = arg(arguments, 0);
+    // `undefined` elements never reach the comparator: they are removed
+    // first and appended after sorting (ES2022 23.1.3.30).
+    let undefined = items
+        .iter()
+        .filter(|item| item.is_undefined())
+        .count();
+    items.retain(|item| !item.is_undefined());
     if comparator.is_function() {
         let mut error: Option<JsValue> = None;
         items.sort_by(|left, right| {
@@ -485,12 +498,15 @@ fn sort(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
             return Err(error);
         }
     } else {
+        // Default comparison uses UTF-16 code-unit order
+        // (ES2022 7.2.13 IsLessThan).
         items.sort_by(|left, right| {
             let left = crate::vm::to_string(realm, left.clone()).unwrap_or_default();
             let right = crate::vm::to_string(realm, right.clone()).unwrap_or_default();
-            left.cmp(&right)
+            crate::coerce::utf16_cmp(&left, &right)
         });
     }
+    items.extend(std::iter::repeat(JsValue::Undefined).take(undefined));
     set_array_items(realm, &object, items);
     Ok(this.clone())
 }

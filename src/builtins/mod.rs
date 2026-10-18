@@ -61,6 +61,20 @@ pub(crate) fn arg_number(realm: &mut Realm, arguments: &[JsValue], index: usize)
     crate::vm::to_number(realm, arg(arguments, index))
 }
 
+/// `ToNumber` of a possibly-absent argument: missing or `undefined` yields
+/// the spec default (unlike `arg_number`, where `undefined` is `NaN`).
+pub(crate) fn arg_number_or(
+    realm: &mut Realm,
+    arguments: &[JsValue],
+    index: usize,
+    default: f64,
+) -> JsResult<f64> {
+    match arguments.get(index) {
+        Some(JsValue::Undefined) | None => Ok(default),
+        Some(value) => crate::vm::to_number(realm, value.clone()),
+    }
+}
+
 pub(crate) fn define_value(target: &ObjRef, name: &str, value: impl Into<JsValue>) {
     target
         .borrow_mut()

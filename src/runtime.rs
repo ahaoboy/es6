@@ -277,6 +277,16 @@ impl Realm {
         allocate(ObjectData::promise(Some(self.promise_proto.clone())))
     }
 
+    /// Wrap a suspended `async` VM frame in an object, mirroring the
+    /// QuickJS `JSAsyncFunction` GC object that owns the suspended stack
+    /// (`JSStackFrame.cur_gc_obj`, quickjs.c:442).
+    pub fn async_frame(&self, frame: Box<crate::vm::Frame>) -> ObjRef {
+        let mut data = ObjectData::ordinary(None);
+        data.kind = ObjectKind::AsyncFrame(Some(frame));
+        data.class_name = "AsyncFunction";
+        allocate(data)
+    }
+
     pub fn array_buffer(&self, length: usize) -> ObjRef {
         allocate(ObjectData::array_buffer(
             Rc::new(RefCell::new(vec![0; length])),

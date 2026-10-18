@@ -130,12 +130,32 @@ fn fround(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     unary(realm, a, |value| value as f32 as f64)
 }
 fn hypot(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    let mut sum = 0.0;
+    // Scale by the maximum magnitude so intermediates cannot overflow
+    // (ES2022 20.2.2.18).
+    let mut max: f64 = 0.0;
+    let mut has_nan = false;
     for value in a {
         let number = crate::vm::to_numeric(realm, value.clone())?;
+        if number.is_nan() {
+            has_nan = true;
+        }
+        max = max.max(number.abs());
+    }
+    if has_nan {
+        return Ok(JsValue::number(f64::NAN));
+    }
+    if max.is_infinite() {
+        return Ok(JsValue::number(f64::INFINITY));
+    }
+    if max == 0.0 {
+        return Ok(JsValue::number(0.0));
+    }
+    let mut sum = 0.0;
+    for value in a {
+        let number = crate::vm::to_numeric(realm, value.clone())? / max;
         sum += number * number;
     }
-    Ok(JsValue::number(sum.sqrt()))
+    Ok(JsValue::number(max * sum.sqrt()))
 }
 fn imul(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     let left = crate::vm::to_int32(crate::vm::to_numeric(realm, arg(a, 0))?);
@@ -155,21 +175,30 @@ fn log2(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     unary(realm, a, f64::log2)
 }
 fn max(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
+    // NaN propagates (ES2022 20.2.2.24); Rust's f64::max would drop it.
     let mut result = f64::NEG_INFINITY;
     for value in a {
-        result = result.max(crate::vm::to_numeric(realm, value.clone())?);
+        let number = crate::vm::to_numeric(realm, value.clone())?;
+        if number.is_nan() {
+            return Ok(JsValue::number(f64::NAN));
+        }
+        result = result.max(number);
     }
     Ok(JsValue::number(result))
 }
 fn min(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     let mut result = f64::INFINITY;
     for value in a {
-        result = result.min(crate::vm::to_numeric(realm, value.clone())?);
+        let number = crate::vm::to_numeric(realm, value.clone())?;
+        if number.is_nan() {
+            return Ok(JsValue::number(f64::NAN));
+        }
+        result = result.min(number);
     }
     Ok(JsValue::number(result))
 }
 fn pow(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    binary(realm, a, f64::powf)
+    binary(realm, a, crate::coerce::js_pow)
 }
 fn random(_r: &mut Realm, _t: &JsValue, _a: &[JsValue]) -> JsResult<JsValue> {
     use std::cell::Cell;
@@ -185,9 +214,16 @@ fn random(_r: &mut Realm, _t: &JsValue, _a: &[JsValue]) -> JsResult<JsValue> {
     Ok(JsValue::number(value))
 }
 fn round(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
-    Ok(JsValue::number(
-        (crate::vm::to_numeric(realm, arg(a, 0))? + 0.5).floor(),
-    ))
+    // `floor(x + 0.5)` preserving -0 for -0.5 <= x < 0 (ES2022 20.2.2.28).
+    let value = crate::vm::to_numeric(realm, arg(a, 0))?;
+    if value.is_nan() || value.is_infinite() || value == 0.0 {
+        return Ok(JsValue::number(value));
+    }
+    let rounded = (value + 0.5).floor();
+    if rounded == 0.0 && value < 0.0 {
+        return Ok(JsValue::Float(-0.0));
+    }
+    Ok(JsValue::number(rounded))
 }
 fn sign(realm: &mut Realm, _t: &JsValue, a: &[JsValue]) -> JsResult<JsValue> {
     let value = crate::vm::to_numeric(realm, arg(a, 0))?;

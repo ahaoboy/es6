@@ -98,11 +98,7 @@ fn decode_uri_component(
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
     let value = crate::vm::to_string(realm, arg(arguments, 0))?;
-    percent_decode(&value).ok_or_else(|| realm.uri_error("URI malformed"))
-}
-
-fn decode_uri(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    decode_uri_component(realm, _this, arguments)
+    percent_decode(&value, true).ok_or_else(|| realm.uri_error("URI malformed"))
 }
 
 fn percent_encode(value: &str, keep_uri_chars: bool) -> String {
@@ -120,7 +116,15 @@ fn percent_encode(value: &str, keep_uri_chars: bool) -> String {
     result
 }
 
-fn percent_decode(value: &str) -> Option<JsValue> {
+/// `decodeURI`: reserved characters stay percent-encoded (ES2022 19.5.3.2)
+/// — only the `decodeURIComponent` set decodes them.
+fn decode_uri(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
+    let value = crate::vm::to_string(realm, arg(arguments, 0))?;
+    percent_decode(&value, false)
+        .ok_or_else(|| realm.uri_error("URI malformed"))
+}
+
+fn percent_decode(value: &str, decode_reserved: bool) -> Option<JsValue> {
     let bytes = value.as_bytes();
     let mut result = Vec::new();
     let mut index = 0;
@@ -130,7 +134,13 @@ fn percent_decode(value: &str) -> Option<JsValue> {
                 return None;
             }
             let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
-            result.push(u8::from_str_radix(hex, 16).ok()?);
+            let byte = u8::from_str_radix(hex, 16).ok()?;
+            // decodeURI preserves reserved escapes.
+            if !decode_reserved && ";/?:@&=+$,#".contains(byte as char) {
+                result.extend_from_slice(&bytes[index..index + 3]);
+            } else {
+                result.push(byte);
+            }
             index += 3;
         } else {
             result.push(bytes[index]);

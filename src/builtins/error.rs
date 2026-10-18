@@ -4,7 +4,7 @@ use crate::value::JsValue;
 // QuickJS: JS_AddIntrinsicError / js_error_constructor (quickjs.c).
 pub fn install(realm: &mut Realm) {
     let prototype = realm.error_proto.clone();
-    install_constructor(realm, "Error", 1, error, &prototype);
+    install_constructor(realm, "Error", 1, error_constructor, &prototype);
     define_method(realm, &prototype, "toString", 0, to_string);
     define_value(&prototype, "name", JsValue::string("Error"));
     define_value(&prototype, "message", JsValue::string(""));
@@ -18,7 +18,12 @@ pub fn install(realm: &mut Realm) {
         "URIError",
     ] {
         let prototype = realm.error_prototype(name);
-        let function = realm.native_function(name, 1, error);
+        // Per-type constructor: `TypeError("x")` builds a TypeError whether
+        // called as a function or with `new` (ES2022 20.5.5.1).
+        let function = realm.native_function(name, 1, {
+            let name = name;
+            move |realm, _this, arguments| error_native(realm, name, arguments)
+        });
         if let Some(object) = function.as_object() {
             object.set("prototype", JsValue::Object(prototype.clone()));
         }
@@ -28,23 +33,48 @@ pub fn install(realm: &mut Realm) {
     }
 }
 
-fn error(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
+fn error_native(realm: &mut Realm, name: &str, arguments: &[JsValue]) -> JsResult<JsValue> {
     let message = if arg(arguments, 0).is_undefined() {
         String::new()
     } else {
         crate::vm::to_string(realm, arg(arguments, 0))?
     };
-    let name = this
-        .as_object()
-        .and_then(|object| object.to_ref().borrow().prototype.clone())
-        .and_then(|prototype| {
-            prototype
-                .borrow()
-                .get_own_value(&crate::object::PropKey::from("name"))
-        })
-        .and_then(|value| value.as_string())
-        .unwrap_or_else(|| std::rc::Rc::from("Error"));
-    Ok(realm.error_object(&name, &message))
+    Ok(realm.error_object(name, &message))
+}
+
+/// `Error(msg[, options])`: sets `message` and an optional `cause`
+/// (ES2022 20.5.1.1).
+fn error_constructor(
+    realm: &mut Realm,
+    this: &JsValue,
+    arguments: &[JsValue],
+) -> JsResult<JsValue> {
+    if this.is_object() {
+        let message = if arg(arguments, 0).is_undefined() {
+            None
+        } else {
+            Some(crate::vm::to_string(realm, arg(arguments, 0))?)
+        };
+        if let JsValue::Object(object) = this {
+            if let Some(message) = message {
+                object.borrow_mut().define(
+                    "message",
+                    crate::object::Property::data(JsValue::string(message)),
+                );
+            }
+            if let JsValue::Object(options) = arg(arguments, 1) {
+                let cause = get(realm, &JsValue::Object(options.clone()), "cause")?;
+                if !cause.is_undefined() {
+                    object.borrow_mut().define(
+                        "cause",
+                        crate::object::Property::data(cause),
+                    );
+                }
+            }
+        }
+        return Ok(this.clone());
+    }
+    error_native(realm, "Error", arguments)
 }
 
 fn to_string(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {

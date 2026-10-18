@@ -216,16 +216,19 @@ impl ObjectData {
     /// (ES2022 10.1.12), like QuickJS `__JS_GetOwnPropertyNamesInternal`
     /// (quickjs.c:9515).
     pub fn own_keys(&self) -> Vec<PropKey> {
-        self.keys_by(|_| true)
+        self.keys_by(false)
     }
 
     pub fn enumerable_keys(&self) -> Vec<PropKey> {
-        self.keys_by(|property| property.enumerable)
+        self.keys_by(true)
     }
 
-    fn keys_by(&self, filter: impl Fn(&Property) -> bool) -> Vec<PropKey> {
+    fn keys_by(&self, enumerable_only: bool) -> Vec<PropKey> {
         let mut indices: Vec<usize> = Vec::new();
         let mut keys = Vec::new();
+        // Virtual keys of exotic objects are never enumerable
+        // (ES2022 10.4.2.3 and friends).
+        let include_virtual = !enumerable_only;
         match &self.kind {
             ObjectKind::Array(data) => {
                 // Only present dense elements are own properties; holes are
@@ -235,15 +238,28 @@ impl ObjectData {
                         indices.push(index);
                     }
                 }
-                keys.push(PropKey::from("length"));
+                if include_virtual {
+                    keys.push(PropKey::from("length"));
+                }
             }
             ObjectKind::TypedArray(data) => {
                 indices.extend(0..data.length);
+                if include_virtual {
+                    keys.push(PropKey::from("length"));
+                    keys.push(PropKey::from("byteLength"));
+                    keys.push(PropKey::from("byteOffset"));
+                }
+            }
+            ObjectKind::BoxedString(value) => {
+                indices.extend(0..utf16_len(value));
+                if include_virtual {
+                    keys.push(PropKey::from("length"));
+                }
             }
             _ => {}
         }
         for (key, property) in self.props.iter() {
-            if !filter(property) {
+            if enumerable_only && !property.enumerable {
                 continue;
             }
             match key {

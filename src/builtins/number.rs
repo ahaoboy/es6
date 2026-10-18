@@ -83,7 +83,21 @@ fn is_safe_integer(
 
 fn parse_float(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = crate::vm::to_string(realm, arg(arguments, 0))?;
-    let value = value.trim_start();
+    let value = crate::coerce::trim_ecma_whitespace(&value);
+    // `parseFloat` accepts a leading `Infinity` (ES2022 19.2.5).
+    for prefix in ["Infinity", "+Infinity", "-Infinity"] {
+        if let Some(rest) = value.strip_prefix(prefix) {
+            if rest.is_empty()
+                || !rest.as_bytes()[0].is_ascii_digit()
+                || rest.starts_with('.')
+            {
+                return Ok(JsValue::number(match prefix {
+                    "-Infinity" => f64::NEG_INFINITY,
+                    _ => f64::INFINITY,
+                }));
+            }
+        }
+    }
     let mut end = 0;
     let bytes = value.as_bytes();
     if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
@@ -125,7 +139,7 @@ fn parse_float(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
 
 fn parse_int(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = crate::vm::to_string(realm, arg(arguments, 0))?;
-    let mut value = value.trim_start();
+    let mut value = crate::coerce::trim_ecma_whitespace(&value);
     let mut sign = 1.0;
     if let Some(rest) = value.strip_prefix('-') {
         sign = -1.0;
@@ -148,6 +162,18 @@ fn parse_int(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsRes
         {
             radix = 16;
             value = rest;
+        } else if let Some(rest) = value
+            .strip_prefix("0o")
+            .or_else(|| value.strip_prefix("0O"))
+        {
+            radix = 8;
+            value = rest;
+        } else if let Some(rest) = value
+            .strip_prefix("0b")
+            .or_else(|| value.strip_prefix("0B"))
+        {
+            radix = 2;
+            value = rest;
         } else {
             radix = 10;
         }
@@ -169,10 +195,38 @@ fn parse_int(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsRes
     if end == 0 {
         return Ok(JsValue::number(f64::NAN));
     }
+    // Accumulate exactly in u128 while it fits, so only one rounding
+    // happens (correctly-rounded like every engine); longer inputs fall
+    // back to double accumulation.
     let digits = &value[..end];
-    let parsed = u64::from_str_radix(digits, radix)
-        .map(|value| value as f64)
-        .unwrap_or(f64::NAN);
+    let radix_u = u128::from(radix);
+    let mut exact: u128 = 0;
+    let mut base: u128 = 1;
+    let mut overflow = false;
+    for ch in digits.chars().rev() {
+        let digit = u128::from(ch.to_digit(radix).unwrap_or(0));
+        match digit
+            .checked_mul(base)
+            .and_then(|scaled| exact.checked_add(scaled))
+        {
+            Some(sum) => exact = sum,
+            None => {
+                overflow = true;
+                break;
+            }
+        }
+        match base.checked_mul(radix_u) {
+            Some(next) => base = next,
+            None => break,
+        }
+    }
+    let parsed = if overflow {
+        digits.chars().fold(0.0, |number, ch| {
+            number * f64::from(radix) + f64::from(ch.to_digit(radix).unwrap_or(0))
+        })
+    } else {
+        exact as f64
+    };
     Ok(JsValue::number(parsed * sign))
 }
 
@@ -186,29 +240,179 @@ fn to_string(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
     if !(2..=36).contains(&radix) {
         return Err(realm.range_error("toString() radix must be between 2 and 36"));
     }
-    if radix == 10 {
+    if radix == 10 || !value.is_finite() {
         return Ok(JsValue::string(crate::vm::format_number(value)));
     }
-    if !value.is_finite() {
-        return Ok(JsValue::string(crate::vm::format_number(value)));
+    Ok(JsValue::string(format_radix(value, radix)))
+}
+
+/// `Number.prototype.toString(radix)` (ES2022 6.1.6.1.20): exact integer
+/// part plus the fraction obtained by repeated radix multiplication, like
+/// `js_dtoa` FREE format with an arbitrary radix (dtoa.c:1107).
+fn format_radix(value: f64, radix: u32) -> String {
+    let negative = value.is_sign_negative();
+    let value = value.abs();
+    let mut integer = value.trunc();
+    let mut fraction = value.fract();
+    // The integer part of every finite double fits in u128.
+    let mut digits: Vec<u8> = Vec::new();
+    while integer > 0.0 {
+        let digit = (integer % f64::from(radix)).trunc() as u8;
+        digits.push(digit);
+        integer = (integer / f64::from(radix)).trunc();
+        if integer * f64::from(radix) == integer && integer > 0.0 {
+            break;
+        }
     }
-    let negative = value < 0.0;
-    let mut value = value.abs().trunc() as u64;
-    let mut digits = Vec::new();
-    if value == 0 {
-        digits.push('0');
-    }
-    while value > 0 {
-        let digit = (value % radix as u64) as u32;
-        digits.push(char::from_digit(digit, radix).unwrap_or('0'));
-        value /= radix as u64;
+    if digits.is_empty() {
+        digits.push(0);
     }
     digits.reverse();
-    let mut result: String = digits.into_iter().collect();
+    let mut result = String::new();
     if negative {
-        result.insert(0, '-');
+        result.push('-');
     }
-    Ok(JsValue::string(result))
+    for digit in digits {
+        result.push(char::from_digit(digit as u32, radix).unwrap_or('0'));
+    }
+    if fraction > 0.0 {
+        result.push('.');
+        // Emit fraction digits until the remainder is exhausted; doubles
+        // need at most ~1100 binary digits.
+        for _ in 0..1100 {
+            fraction *= f64::from(radix);
+            let digit = fraction.trunc() as u8;
+            result.push(char::from_digit(digit as u32, radix).unwrap_or('0'));
+            fraction -= digit as f64;
+            if fraction <= 0.0 {
+                break;
+            }
+        }
+    }
+    result
+}
+
+/// Decimal digits of a finite non-zero double from its shortest
+/// round-trip representation: `(digits, point)` where the value is
+/// `0.digits × 10^point`, with no non-significant leading zeros.
+fn decimal_digits(value: f64) -> (String, i32) {
+    let mut buffer = ryu::Buffer::new();
+    let text = buffer.format(value.abs());
+    let negative = text.starts_with('-');
+    let text = if negative { &text[1..] } else { text };
+    let (mantissa, exponent_text) = match text.split_once('e') {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().unwrap_or(0)),
+        None => (text, 0),
+    };
+    let mut digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    let mut point = mantissa.find('.').map_or(digits.len() as i32, |index| index as i32);
+    point += exponent_text;
+    // Drop non-significant leading zeros: `0.000123` must become
+    // `("123", -3)`, not `("0000123", 1)`.
+    let stripped = digits.len() - digits.trim_start_matches('0').len();
+    if stripped > 0 {
+        digits = digits[stripped..].to_owned();
+        point -= stripped as i32;
+    }
+    if digits.is_empty() {
+        return ("0".into(), 1);
+    }
+    (digits, point)
+}
+
+/// Round `0.digits × 10^point` to `keep` significant digits, half-up.
+fn round_digits(digits: &str, point: i32, keep: usize) -> (String, i32) {
+    let mut kept: String = digits.chars().take(keep).collect();
+    let mut point = point;
+    if digits.len() > keep {
+        let round_up = digits
+            .chars()
+            .nth(keep)
+            .is_some_and(|ch| ch > '4');
+        if round_up {
+            let mut overflow = true;
+            for index in (0..kept.len()).rev() {
+                let digit = kept.as_bytes()[index] - b'0' + 1;
+                if digit < 10 {
+                    kept.replace_range(index..index + 1, &((digit + b'0') as char).to_string());
+                    overflow = false;
+                    break;
+                }
+                kept.replace_range(index..index + 1, "0");
+            }
+            if overflow {
+                kept.insert(0, '1');
+                point += 1;
+            }
+        }
+    }
+    while kept.len() < keep {
+        kept.push('0');
+    }
+    (kept, point)
+}
+
+/// Render `0.digits × 10^point` in positional notation with `fraction`
+/// digits after the decimal point (digits must be pre-padded).
+fn render_fixed(digits: &str, point: i32, negative: bool, fraction: usize) -> String {
+    let mut result = String::new();
+    if negative {
+        result.push('-');
+    }
+    if point <= 0 {
+        // `0.00…digits`: leading zeros after the decimal point.
+        result.push_str("0.");
+        result.push_str(&"0".repeat(point.unsigned_abs() as usize));
+        let mut tail = digits.to_owned();
+        while tail.len() < fraction {
+            tail.push('0');
+        }
+        result.push_str(&tail[..fraction]);
+    } else {
+        let point = point as usize;
+        if point >= digits.len() {
+            result.push_str(digits);
+            result.push_str(&"0".repeat(point - digits.len()));
+            result.push('.');
+        } else {
+            result.push_str(&digits[..point]);
+            result.push('.');
+        }
+        let mut tail: String = digits[point..].to_owned();
+        while tail.len() < fraction {
+            tail.push('0');
+        }
+        result.push_str(&tail[..fraction]);
+    }
+    if fraction == 0 {
+        result.pop();
+    }
+    result
+}
+
+/// Render `0.digits × 10^point` in exponential notation with the decimal
+/// point after the first digit (ES2022 6.1.6.1.20 `e` form).
+fn render_exponential(digits: &str, point: i32, negative: bool, fraction: usize) -> String {
+    let mut result = String::new();
+    if negative {
+        result.push('-');
+    }
+    result.push(digits.as_bytes()[0] as char);
+    if fraction > 0 {
+        result.push('.');
+        let mut tail: String = digits[1..].to_owned();
+        while tail.len() < fraction {
+            tail.push('0');
+        }
+        result.push_str(&tail[..fraction]);
+    }
+    let exponent = point - 1;
+    if exponent >= 0 {
+        result.push_str(&format!("e+{exponent}"));
+    } else {
+        result.push_str(&format!("e{exponent}"));
+    }
+    result
 }
 
 fn to_string_locale(
@@ -224,29 +428,101 @@ fn value_of(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResu
     Ok(JsValue::number(this_number(realm, this)?))
 }
 
+/// `Number.prototype.toFixed` (ES2022 20.1.3.3): fixed notation with exact
+/// half-up decimal rounding, like `js_dtoa2` with FRAC format
+/// (quickjs.c:14579).
 fn to_fixed(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_number(realm, this)?;
-    let digits = to_integer(arg_number(realm, arguments, 0).unwrap_or(0.0)).clamp(0, 100) as usize;
-    Ok(JsValue::string(format!("{value:.digits$}")))
+    let digits = to_integer(arg_number_or(realm, arguments, 0, 0.0)?);
+    if !(0..=100).contains(&digits) {
+        return Err(realm.range_error("toFixed() digits argument must be between 0 and 100"));
+    }
+    if value.is_nan() {
+        return Ok(JsValue::string("NaN"));
+    }
+    if value.is_infinite() {
+        return Ok(JsValue::string(crate::vm::format_number(value)));
+    }
+    let digits = digits as usize;
+    if value.abs() >= 1e21 {
+        return Ok(JsValue::string(crate::vm::format_number(value)));
+    }
+    let negative = value.is_sign_negative();
+    let (raw, point) = decimal_digits(value);
+    let keep = (point + digits as i32).max(1) as usize;
+    let (rounded, point) = round_digits(&raw, point, keep);
+    Ok(JsValue::string(render_fixed(
+        &rounded, point, negative, digits,
+    )))
 }
 
+/// `Number.prototype.toExponential` (ES2022 20.1.3.2).
 fn to_exponential(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_number(realm, this)?;
     if value.is_nan() {
         return Ok(JsValue::string("NaN"));
     }
-    if arg(arguments, 0).is_undefined() {
-        return Ok(JsValue::string(format!("{value:e}")));
+    if value.is_infinite() {
+        return Ok(JsValue::string(crate::vm::format_number(value)));
     }
-    let digits = to_integer(arg_number(realm, arguments, 0)?).clamp(0, 100) as usize;
-    Ok(JsValue::string(format!("{value:.digits$e}")))
+    if arg(arguments, 0).is_undefined() {
+        let mut buffer = ryu::Buffer::new();
+        let text = buffer.format(value);
+        return Ok(JsValue::string(match text.split_once('e') {
+            Some((mantissa, exponent)) if !exponent.starts_with('-') => {
+                format!("{mantissa}e+{exponent}")
+            }
+            _ => text.to_owned(),
+        }));
+    }
+    let digits = to_integer(arg_number(realm, arguments, 0)?);
+    if !(0..=100).contains(&digits) {
+        return Err(realm.range_error(
+            "toExponential() argument must be between 0 and 100",
+        ));
+    }
+    let digits = digits as usize;
+    let negative = value.is_sign_negative();
+    let (raw, point) = decimal_digits(value);
+    let (rounded, point) = round_digits(&raw, point, digits + 1);
+    Ok(JsValue::string(render_exponential(
+        &rounded, point, negative, digits,
+    )))
 }
 
+/// `Number.prototype.toPrecision` (ES2022 20.1.3.5): significant digits
+/// with the fixed/exponential switch.
 fn to_precision(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_number(realm, this)?;
     if arg(arguments, 0).is_undefined() {
         return Ok(JsValue::string(crate::vm::format_number(value)));
     }
-    let precision = to_integer(arg_number(realm, arguments, 0)?).clamp(1, 100) as usize;
-    Ok(JsValue::string(format!("{value:.precision$}")))
+    if value.is_nan() {
+        return Ok(JsValue::string("NaN"));
+    }
+    if value.is_infinite() {
+        return Ok(JsValue::string(crate::vm::format_number(value)));
+    }
+    let precision = to_integer(arg_number(realm, arguments, 0)?);
+    if !(1..=100).contains(&precision) {
+        return Err(realm.range_error(
+            "toPrecision() argument must be between 1 and 100",
+        ));
+    }
+    let precision = precision as usize;
+    let negative = value.is_sign_negative();
+    let (raw, point) = decimal_digits(value);
+    let (rounded, point) = round_digits(&raw, point, precision);
+    // Exponential when the exponent is outside the precision window
+    // (ES2022 20.1.3.5 step 10).
+    if point < -6 || point > precision as i32 {
+        Ok(JsValue::string(render_exponential(
+            &rounded, point, negative, precision - 1,
+        )))
+    } else {
+        let fraction = precision.saturating_sub(point.max(0) as usize);
+        Ok(JsValue::string(render_fixed(
+            &rounded, point, negative, fraction,
+        )))
+    }
 }

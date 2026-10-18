@@ -36,7 +36,16 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
             for entry in entries {
                 let values = crate::vm::iterable_items(realm, entry)?;
                 if values.len() >= 2 {
-                    map.push((values[0].clone(), values[1].clone()));
+                    // Set-semantics: SameValueZero replaces existing keys
+                    // (ES2022 24.1.1.1).
+                    if let Some(existing) = map
+                        .iter_mut()
+                        .find(|(key, _)| crate::vm::same_value_zero(key, &values[0]))
+                    {
+                        existing.1 = values[1].clone();
+                    } else {
+                        map.push((values[0].clone(), values[1].clone()));
+                    }
                 }
             }
         }

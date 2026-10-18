@@ -65,7 +65,13 @@ fn description(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsR
     let JsValue::Symbol(id) = this else {
         return Err(realm.type_error("Not a symbol"));
     };
-    Ok(JsValue::string(realm.symbol_description(*id).to_string()))
+    // An empty description is `undefined`, not the empty string
+    // (ES2022 20.4.3.2).
+    let description = realm.symbol_description(*id);
+    if description.is_empty() {
+        return Ok(JsValue::Undefined);
+    }
+    Ok(JsValue::string(description.to_string()))
 }
 
 fn to_string(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {

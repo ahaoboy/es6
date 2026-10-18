@@ -245,6 +245,18 @@ pub enum ObjectKind {
     Error,
 }
 
+impl ObjectKind {
+    /// Take the suspended frame out of an async-frame object, like the
+    /// async resume path of `JS_CallInternal` (quickjs.c:18093).
+    #[inline]
+    pub fn take_async_frame(&mut self) -> Option<Box<crate::vm::Frame>> {
+        match self {
+            ObjectKind::AsyncFrame(frame) => frame.take(),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PromiseState {
     Pending,

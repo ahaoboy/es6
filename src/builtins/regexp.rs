@@ -36,7 +36,7 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
             }
             let flags = crate::vm::to_string(realm, arg(arguments, 1))?;
             validate_flags(realm, &flags)?;
-            return Ok(make_regexp(realm, &source, &flags));
+            return make_regexp(realm, &source, &flags);
         }
     }
     let source = if arg(arguments, 0).is_undefined() {
@@ -50,7 +50,7 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
         crate::vm::to_string(realm, arg(arguments, 1))?
     };
     validate_flags(realm, &flags)?;
-    Ok(make_regexp(realm, &source, &flags))
+    make_regexp(realm, &source, &flags)
 }
 
 fn validate_flags(realm: &Realm, flags: &str) -> JsResult<()> {
@@ -63,17 +63,28 @@ fn validate_flags(realm: &Realm, flags: &str) -> JsResult<()> {
     Ok(())
 }
 
-pub(crate) fn make_regexp(realm: &mut Realm, source: &str, flags: &str) -> JsValue {
+pub(crate) fn make_regexp(realm: &mut Realm, source: &str, flags: &str) -> JsResult<JsValue> {
     let compile_flags: String = flags.chars().filter(|ch| "imsu".contains(*ch)).collect();
+    // Invalid patterns throw, like `js_compile_regexp` (quickjs.c:49197).
     let regex = regress::Regex::with_flags(source, compile_flags.as_str())
-        .unwrap_or_else(|_| regress::Regex::new("(?:)").unwrap());
+        .map_err(|error| realm.syntax_error(format!("Invalid regular expression: {error}")))?;
     let data = Rc::new(RegExpData {
-        source: source.to_owned(),
-        flags: flags.to_owned(),
+        // Normalized source (ES2022 22.1.3.2.1): empty becomes `(?:)`.
+        source: if source.is_empty() {
+            "(?:)".to_owned()
+        } else {
+            source.to_owned()
+        },
+        flags: normalize_flags(flags),
         regex: Rc::new(regex),
     });
     let object = ObjectData::regexp(data, Some(realm.regexp_proto.clone()));
-    JsValue::Object(Rc::new(RefCell::new(object)))
+    Ok(JsValue::Object(Rc::new(RefCell::new(object))))
+}
+
+/// Sort flags into `dgimsuvy` order (ES2022 22.1.3.2.1).
+fn normalize_flags(flags: &str) -> String {
+    "dgimsuvy".chars().filter(|ch| flags.contains(*ch)).collect()
 }
 
 fn regexp_data(realm: &Realm, value: &JsValue) -> JsResult<Rc<RegExpData>> {
@@ -89,27 +100,47 @@ fn regexp_data(realm: &Realm, value: &JsValue) -> JsResult<Rc<RegExpData>> {
 fn exec(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let data = regexp_data(realm, this)?;
     let input = crate::vm::to_string(realm, arg(arguments, 0))?;
-    let start = if data.flags.contains('g') || data.flags.contains('y') {
+    let global = data.flags.contains('g');
+    let sticky = data.flags.contains('y');
+    let start = if global || sticky {
         let last_index = get(realm, this, "lastIndex")?;
-        crate::vm::to_uint32(last_index.as_number().unwrap_or(0.0)) as usize
+        let start = crate::vm::to_uint32(last_index.as_number().unwrap_or(0.0)) as usize;
+        // `lastIndex` beyond the input length fails without a match.
+        if start > input.len() {
+            if global || sticky {
+                set(realm, this, "lastIndex", JsValue::number(0.0))?;
+            }
+            return Ok(JsValue::Null);
+        }
+        start
     } else {
         0
     };
-    let start = start.min(input.len());
-    let Some(matched) = data
-        .regex
-        .find_from(&input, start)
-        .next()
-        .or_else(|| data.regex.find(&input))
-    else {
-        if data.flags.contains('g') || data.flags.contains('y') {
+    let matched = if sticky {
+        // Sticky regexes anchor the match at `lastIndex` exactly.
+        data.regex
+            .find_from(&input, start)
+            .next()
+            .filter(|matched| matched.range().start == start)
+    } else {
+        data.regex.find_from(&input, start).next()
+    };
+    let Some(matched) = matched else {
+        // A failed exec resets `lastIndex` (ES2022 22.2.5.2.2), never
+        // restarting the search from the beginning.
+        if global || sticky {
             set(realm, this, "lastIndex", JsValue::number(0.0))?;
         }
         return Ok(JsValue::Null);
     };
     let range = matched.range();
-    if data.flags.contains('g') || data.flags.contains('y') {
-        set(realm, this, "lastIndex", JsValue::number(range.end as f64))?;
+    if global || sticky {
+        set(
+            realm,
+            this,
+            "lastIndex",
+            JsValue::number(range.end as f64),
+        )?;
     }
     let mut values = vec![JsValue::string(input[range.clone()].to_owned())];
     for index in 1..=matched.captures.len() {
@@ -121,7 +152,11 @@ fn exec(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
         );
     }
     let result = realm.array(values);
-    define_value(&result, "index", JsValue::number(range.start as f64));
+    define_value(
+        &result,
+        "index",
+        JsValue::number(range.start as f64),
+    );
     define_value(&result, "input", JsValue::string(input));
     Ok(JsValue::Object(result))
 }

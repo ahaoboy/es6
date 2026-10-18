@@ -189,8 +189,33 @@ fn set_proto(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
     Ok(this.clone())
 }
 
+/// `ToObject` (ES2022 7.1.18): primitives box into wrapper objects, so
+/// `Object.keys("ab")` works like in every engine.
+fn to_object_value(realm: &mut Realm, value: &JsValue) -> JsResult<JsValue> {
+    match value {
+        JsValue::Object(_) => Ok(value.clone()),
+        JsValue::String(text) => {
+            let object = realm.boxed_string(text.clone());
+            Ok(JsValue::Object(object))
+        }
+        JsValue::Int(_) | JsValue::Float(_) => {
+            let number = value.as_number().unwrap_or(f64::NAN);
+            let object = realm.boxed_number(number);
+            Ok(JsValue::Object(object))
+        }
+        JsValue::Bool(flag) => {
+            let object = realm.boxed_bool(*flag);
+            Ok(JsValue::Object(object))
+        }
+        JsValue::Symbol(_) | JsValue::Undefined | JsValue::Null => {
+            Err(realm.type_error("Cannot convert undefined or null to object"))
+        }
+    }
+}
+
 fn keys(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let object = require_object(realm, &arg(arguments, 0))?;
+    let source = to_object_value(realm, &arg(arguments, 0))?;
+    let object = require_object(realm, &source)?;
     let keys = object
         .to_ref()
         .borrow()
@@ -202,7 +227,7 @@ fn keys(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<J
 }
 
 fn values(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let source = arg(arguments, 0);
+    let source = to_object_value(realm, &arg(arguments, 0))?;
     let object = require_object(realm, &source)?;
     let mut result = Vec::new();
     let keys = object.to_ref().borrow().enumerable_keys();
@@ -213,7 +238,7 @@ fn values(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult
 }
 
 fn entries(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let source = arg(arguments, 0);
+    let source = to_object_value(realm, &arg(arguments, 0))?;
     let object = require_object(realm, &source)?;
     let mut result = Vec::new();
     let keys = object.to_ref().borrow().enumerable_keys();
@@ -421,17 +446,40 @@ fn get_own_property_descriptor(
                 property.get.as_deref().cloned(),
                 property.set.as_deref().cloned(),
             ),
-            None => (true, true, true, None, None),
+            // Virtual properties: dense elements and exotic built-in
+            // fields, with the attribute sets of ES2022 10.4.
+            None => match (&data.kind, key.index(), key.as_str()) {
+                (ObjectKind::Array(_), _, Some(name)) if name == "length" => {
+                    (true, false, false, None, None)
+                }
+                (ObjectKind::Array(_) | ObjectKind::BoxedString(_), Some(_), _) => {
+                    (true, true, true, None, None)
+                }
+                (ObjectKind::BoxedString(_), _, Some(name)) if name == "length" => {
+                    (false, false, false, None, None)
+                }
+                (ObjectKind::TypedArray(_), _, Some(name))
+                    if matches!(name, "length" | "byteLength" | "byteOffset" | "buffer") =>
+                {
+                    (false, false, false, None, None)
+                }
+                (ObjectKind::TypedArray(_), Some(_), _) => (true, true, false, None, None),
+                _ => (true, true, true, None, None),
+            },
         }
     };
     let descriptor = realm.object();
-    define_value(&descriptor, "value", value);
-    define_value(&descriptor, "writable", JsValue::Bool(writable));
-    if let Some(get) = get {
-        define_value(&descriptor, "get", get);
-    }
-    if let Some(set) = set {
-        define_value(&descriptor, "set", set);
+    if get.is_some() || set.is_some() {
+        // Accessor descriptors carry only `get`/`set` (ES2022 6.2.5.1).
+        if let Some(get) = get {
+            define_value(&descriptor, "get", get);
+        }
+        if let Some(set) = set {
+            define_value(&descriptor, "set", set);
+        }
+    } else {
+        define_value(&descriptor, "value", value);
+        define_value(&descriptor, "writable", JsValue::Bool(writable));
     }
     define_value(&descriptor, "enumerable", JsValue::Bool(enumerable));
     define_value(&descriptor, "configurable", JsValue::Bool(configurable));

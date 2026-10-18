@@ -25,29 +25,47 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
         return Err(realm.type_error("Promise resolver is not a function"));
     }
     let promise = realm.promise();
-    let resolve = realm.native_function("", 1, {
-        let promise = promise.clone();
-        move |realm, _this, arguments| {
-            if matches!(core::state(&promise), Some((PromiseState::Pending, _))) {
-                core::resolve(realm, &promise, arg(arguments, 0))?;
-            }
-            Ok(JsValue::Undefined)
-        }
-    });
-    let reject = realm.native_function("", 1, {
-        let promise = promise.clone();
-        move |realm, _this, arguments| {
-            if matches!(core::state(&promise), Some((PromiseState::Pending, _))) {
-                core::reject(realm, &promise, arg(arguments, 0))?;
-            }
-            Ok(JsValue::Undefined)
-        }
-    });
+    // The resolve/reject pair carries the promise in a GC-visible data cell
+    // (quickjs `js_c_function_data`, quickjs.c:6595).
+    let data: crate::object::NativeData = Rc::new(std::cell::RefCell::new(vec![
+        JsValue::Object(promise.clone()),
+    ]));
+    let resolve = realm.native_function_data("", 1, data.clone(), executor_resolve);
+    let reject = realm.native_function_data("", 1, data, executor_reject);
     if let Err(error) = super::call(realm, executor, JsValue::Undefined, &[resolve, reject]) {
         crate::vm::clear_error_offset();
         core::reject(realm, &promise, error)?;
     }
     Ok(JsValue::Object(promise))
+}
+
+/// `js_promise_resolve_function` (quickjs.c): settle the executor promise.
+fn executor_resolve(
+    realm: &mut Realm,
+    _this: &JsValue,
+    arguments: &[JsValue],
+    data: &[JsValue],
+) -> JsResult<JsValue> {
+    if let Some(JsValue::Object(promise)) = data.first() {
+        if matches!(core::state(promise), Some((PromiseState::Pending, _))) {
+            core::resolve(realm, promise, arg(arguments, 0))?;
+        }
+    }
+    Ok(JsValue::Undefined)
+}
+
+fn executor_reject(
+    realm: &mut Realm,
+    _this: &JsValue,
+    arguments: &[JsValue],
+    data: &[JsValue],
+) -> JsResult<JsValue> {
+    if let Some(JsValue::Object(promise)) = data.first() {
+        if matches!(core::state(promise), Some((PromiseState::Pending, _))) {
+            core::reject(realm, promise, arg(arguments, 0))?;
+        }
+    }
+    Ok(JsValue::Undefined)
 }
 
 fn resolve(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {

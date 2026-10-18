@@ -31,15 +31,20 @@ pub fn get_value_property(realm: &mut Realm, value: &JsValue, key: &PropKey) -> 
         }
         JsValue::String(text_value) => {
             let text = text_value.as_ref();
-            if let Some(key) = key.as_str() {
-                if key == "length" {
-                    return Ok(JsValue::number(crate::object::utf16_len(text) as f64));
+            let index = match key {
+                PropKey::Str(name) if name.as_ref() == "length" => {
+                    return Ok(JsValue::number(
+                        crate::object::utf16_len(text) as f64,
+                    ));
                 }
-                if let Some(index) = key_to_index(key)
-                    && let Some(ch) = crate::object::utf16_char(text, index)
-                {
-                    return Ok(JsValue::string(ch));
-                }
+                // Element reads reach here as canonical `Index` keys as well
+                // as numeric strings, like QuickJS' tagged-int atoms.
+                other => other.index(),
+            };
+            if let Some(index) = index
+                && let Some(ch) = crate::object::utf16_char(text, index)
+            {
+                return Ok(JsValue::string(ch));
             }
             let prototype = ObjectData::ordinary(Some(realm.string_proto.clone()));
             prototype.get_property(realm, key, value)
