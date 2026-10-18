@@ -34,7 +34,7 @@ impl Compiler {
                 }
             };
             let is_constructor = !element.is_static && element.kind_is_constructor(&method_name);
-            let compiled = self.compile_function(
+            let compiled = self.compile_child_function(
                 function,
                 is_constructor,
                 class.super_class.is_some(),
@@ -73,12 +73,18 @@ impl Compiler {
                 is_generator: false,
                 strict: true,
                 is_class_fields: false,
+                simple_params: 0,
                 source: self.source_name.clone(),
                 name_atom: std::cell::RefCell::new(None),
             }));
         }
         let instance_init = self.compile_field_initializer(&instance_fields)?;
         let static_init = self.compile_field_initializer(&static_fields)?;
+        if instance_init.as_ref().is_some_and(|def| def.use_env)
+            || static_init.as_ref().is_some_and(|def| def.use_env)
+        {
+            self.needs_env_link = true;
+        }
         let def = Rc::new(ClassDef {
             name: Rc::from(name.as_str()),
             constructor,

@@ -136,7 +136,7 @@ impl Compiler {
                 self.compile_var_declaration(declaration)?;
             }
             StmtKind::Function(function) => {
-                let def = self.compile_function(function, false, false, true)?;
+                let def = self.compile_child_function(function, false, false, true)?;
                 let constant = self.add_constant(Constant::Function(def));
                 self.emit(Op::Closure(constant));
                 if let Some(name) = &function.name {

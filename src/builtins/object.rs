@@ -119,7 +119,7 @@ fn value_of(_realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsRes
 }
 
 fn has_own_property(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let object = this_object(realm, this)?;
+    let object = require_object(realm, this)?;
     let key = crate::vm::to_property_key(realm, arg(arguments, 0))?;
     Ok(JsValue::Bool(object.to_ref().borrow().has_own(&key)))
 }
@@ -148,7 +148,7 @@ fn property_is_enumerable(
     this: &JsValue,
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
-    let object = this_object(realm, this)?;
+    let object = require_object(realm, this)?;
     let key = crate::vm::to_property_key(realm, arg(arguments, 0))?;
     let data = object.to_ref();
     let data = data.borrow();
@@ -167,13 +167,13 @@ fn property_is_enumerable(
 }
 
 fn get_proto(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
-    let object = this_object(realm, this)?;
+    let object = require_object(realm, this)?;
     let proto = object.to_ref().borrow().prototype.clone();
     Ok(proto.map(JsValue::Object).unwrap_or(JsValue::Undefined))
 }
 
 fn set_proto(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let object = this_object(realm, this)?;
+    let object = require_object(realm, this)?;
     match arg(arguments, 0) {
         JsValue::Object(proto) => {
             if crate::object::would_create_cycle(&object.to_ref(), &proto) {

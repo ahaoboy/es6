@@ -113,9 +113,18 @@ impl Frame {
         self.local_size = 0;
         if !use_env {
             let size = self.definition.env_size as usize;
+            self.locals.clear();
             self.locals.resize(size, JsValue::Undefined);
             self.local_frames.push((0, size));
             self.local_size = size;
+            // Leading plain parameters land directly in their slots, like
+            // QuickJS' contiguous `arg_buf` (quickjs.c:18132).
+            let simple = (self.definition.simple_params as usize).min(size);
+            for index in 0..simple {
+                if let Some(value) = self.arguments.get(index) {
+                    self.locals[index] = value.clone();
+                }
+            }
             if self.definition.is_class_fields {
                 for slot in 0..size {
                     self.locals[slot] = crate::object::Object::from_value(&self.this)
@@ -124,6 +133,14 @@ impl Frame {
                 }
             }
             return;
+        }
+        if let Some(env) = &self.env {
+            let simple = (self.definition.simple_params as usize).min(env.slots.borrow().len());
+            for index in 0..simple {
+                if let Some(value) = self.arguments.get(index) {
+                    env.slots.borrow_mut()[index] = value.clone();
+                }
+            }
         }
         if self.definition.is_class_fields
             && let Some(env) = &self.env

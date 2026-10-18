@@ -97,9 +97,9 @@ fn bind(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
     ))
 }
 
-fn to_string(_realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
+fn to_string(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
     let Some(function) = this.as_object() else {
-        return Err(JsValue::string("TypeError: not a function"));
+        return Err(realm.type_error("not a function"));
     };
     let data = function.into_ref();
     let data = data.borrow();

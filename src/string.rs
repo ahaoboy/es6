@@ -114,6 +114,12 @@ impl From<String> for JsString {
     }
 }
 
+impl From<CompactString> for JsString {
+    fn from(value: CompactString) -> Self {
+        Self(Rc::new(value))
+    }
+}
+
 impl From<&String> for JsString {
     fn from(value: &String) -> Self {
         Self::new(value.as_str())

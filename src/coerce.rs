@@ -404,12 +404,23 @@ pub fn add_values(realm: &mut Realm, left: JsValue, right: JsValue) -> JsResult<
     if let (Some(left), Some(right)) = (left.as_number(), right.as_number()) {
         return Ok(JsValue::number(left + right));
     }
+    // String + string builds the result once instead of copying both
+    // operands through `to_string` first.
+    if let (JsValue::String(left), JsValue::String(right)) = (&left, &right) {
+        let mut buffer = compact_str::CompactString::with_capacity(left.len() + right.len());
+        buffer.push_str(left.as_str());
+        buffer.push_str(right.as_str());
+        return Ok(JsValue::String(crate::string::JsString::from(buffer)));
+    }
     let left = to_primitive_hint(realm, left, Hint::Default)?;
     let right = to_primitive_hint(realm, right, Hint::Default)?;
     if matches!(left, JsValue::String(_)) || matches!(right, JsValue::String(_)) {
         let left = to_string(realm, left)?;
         let right = to_string(realm, right)?;
-        return Ok(JsValue::string(left + &right));
+        let mut buffer = compact_str::CompactString::with_capacity(left.len() + right.len());
+        buffer.push_str(&left);
+        buffer.push_str(&right);
+        return Ok(JsValue::String(crate::string::JsString::from(buffer)));
     }
     Ok(JsValue::number(
         to_numeric(realm, left)? + to_numeric(realm, right)?,

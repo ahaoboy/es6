@@ -20,7 +20,7 @@ use super::call::{
 use super::iter::{iterable_items, push_array_value};
 use super::property::{
     cached_get_property, cached_set_property, get_element_value, get_value_property,
-    pop_property_key, set_element_value, set_value_property,
+    pop_property_key, property_key_from_constant, set_element_value, set_value_property,
 };
 
 /// Opcode dispatch. This is the Rust counterpart of the giant switch in
@@ -97,10 +97,13 @@ pub(crate) fn execute_op(
         } => {
             let object = frame.get_var(depth, slot);
             let value = match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_get_property(realm, &object, &key, prop_cache)?
-                }
+                Some(prop_cache) => super::property::cached_get_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    prop_cache,
+                )?,
                 None => get_value_property(realm, &object, &PropKey::from(""))?,
             };
             frame.stack.push(value);
@@ -108,10 +111,13 @@ pub(crate) fn execute_op(
         Op::GetThisPropConst { key, cache } => {
             let object = frame.this.clone();
             let value = match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_get_property(realm, &object, &key, prop_cache)?
-                }
+                Some(prop_cache) => super::property::cached_get_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    prop_cache,
+                )?,
                 None => get_value_property(realm, &object, &PropKey::from(""))?,
             };
             frame.stack.push(value);
@@ -307,10 +313,14 @@ pub(crate) fn execute_op(
             let value = pop(&mut frame.stack)?;
             let object = pop(&mut frame.stack)?;
             match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_set_property(realm, &object, &key, &value, prop_cache)?;
-                }
+                Some(prop_cache) => super::property::cached_set_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    &value,
+                    prop_cache,
+                )?,
                 None => {
                     let key = property_key_from_constant(&frame.definition, key)?;
                     set_value_property(realm, &object, &key, value.clone(), true)?;
@@ -784,7 +794,10 @@ pub(crate) fn execute_op(
             let left = pop(&mut frame.stack)?;
             let value = match add_ints(&left, &right) {
                 Some(value) => value,
-                None => super::add_values(realm, left, right)?,
+                None => match (&left, &right) {
+                    (JsValue::Float(left), JsValue::Float(right)) => JsValue::Float(left + right),
+                    _ => super::add_values(realm, left, right)?,
+                },
             };
             frame.stack.push(value);
         }
@@ -798,6 +811,8 @@ pub(crate) fn execute_op(
                 } else {
                     frame.stack.push(JsValue::Float(value as f64));
                 }
+            } else if let (JsValue::Float(left), JsValue::Float(right)) = (&left, &right) {
+                frame.stack.push(JsValue::Float(*left - *right));
             } else {
                 let value = super::to_numeric(realm, left)? - super::to_numeric(realm, right)?;
                 frame.stack.push(JsValue::number(value));
@@ -813,12 +828,23 @@ pub(crate) fn execute_op(
                 } else {
                     frame.stack.push(JsValue::Float(value as f64));
                 }
+            } else if let (JsValue::Float(left), JsValue::Float(right)) = (&left, &right) {
+                frame.stack.push(JsValue::Float(*left * *right));
             } else {
                 let value = super::to_numeric(realm, left)? * super::to_numeric(realm, right)?;
                 frame.stack.push(JsValue::number(value));
             }
         }
-        Op::Div => binary_number(realm, frame, |a, b| a / b)?,
+        Op::Div => {
+            let right = pop(&mut frame.stack)?;
+            let left = pop(&mut frame.stack)?;
+            if let (JsValue::Float(left), JsValue::Float(right)) = (&left, &right) {
+                frame.stack.push(JsValue::Float(*left / *right));
+            } else {
+                let value = super::to_numeric(realm, left)? / super::to_numeric(realm, right)?;
+                frame.stack.push(JsValue::number(value));
+            }
+        }
         Op::Mod => binary_number(realm, frame, |a, b| a % b)?,
         Op::Exp => binary_number(realm, frame, crate::coerce::js_pow)?,
         Op::BitAnd => binary_int(realm, frame, |a, b| a & b)?,
@@ -1059,13 +1085,11 @@ pub(crate) fn execute_op(
             }
         }
         Op::Closure(index) => {
-            let value = closure_value(
-                realm,
-                &frame.definition,
-                index,
-                frame.env(),
-                frame.this.clone(),
-            )?;
+            // A function that creates closures only has an environment when
+            // one of them captures its bindings; otherwise an empty root
+            // environment stands in (QuickJS passes `var_refs` the same way).
+            let env = frame.env.clone().unwrap_or_else(|| Env::new(0, None));
+            let value = closure_value(realm, &frame.definition, index, &env, frame.this.clone())?;
             frame.stack.push(value);
         }
         Op::TryStart(catch_pc) => {
@@ -1178,7 +1202,8 @@ pub(crate) fn execute_op(
         Op::CreateClass(index) => {
             let parent = pop(&mut frame.stack)?;
             let class = class_constant(&frame.definition, index)?;
-            let value = create_class(realm, &class, frame.env(), parent)?;
+            let env = frame.env.clone().unwrap_or_else(|| Env::new(0, None));
+            let value = create_class(realm, &class, &env, parent)?;
             frame.stack.push(value);
         }
         Op::ExportAll => {
@@ -1403,15 +1428,6 @@ fn cached_key(
     let key = property_key_from_constant(definition, index)?;
     cache.borrow_mut().key = Some(key.clone());
     Ok(key)
-}
-
-fn property_key_from_constant(definition: &FunctionDef, index: u32) -> JsResult<PropKey> {
-    match definition.constants.get(index as usize) {
-        Some(Constant::String(value)) => Ok(crate::object::key_from_string(value.clone())),
-        Some(Constant::Int(value)) => Ok(PropKey::from(value.to_string())),
-        Some(Constant::Number(value)) => Ok(PropKey::from(super::format_number(*value))),
-        _ => Err(JsValue::string("InternalError: invalid property constant")),
-    }
 }
 
 fn constant_value(

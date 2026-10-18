@@ -63,6 +63,10 @@ pub struct FunctionDef {
     /// the frame at entry. Precomputed so the call path does not compare
     /// function names.
     pub is_class_fields: bool,
+    /// Leading simple parameters pre-filled into slots ..simple_params by
+    /// the frame prologue (QuickJS copies arguments into rg_buf the same
+    /// way, quickjs.c:18132).
+    pub simple_params: u16,
     pub source: String,
     /// Lazily built `name` property atom: every closure creation would
     /// otherwise allocate a fresh string for the same bytecode name.
@@ -96,6 +100,7 @@ impl FunctionDef {
                 is_generator: false,
                 strict: false,
                 is_class_fields: false,
+                simple_params: 0,
                 source: String::new(),
                 name_atom: RefCell::new(None),
             });

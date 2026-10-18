@@ -25,12 +25,12 @@ impl Compiler {
             ExprKind::Array(elements) => self.compile_array_literal(elements)?,
             ExprKind::Object(properties) => self.compile_object_literal(properties)?,
             ExprKind::Function(function) => {
-                let def = self.compile_function(function, false, false, false)?;
+                let def = self.compile_child_function(function, false, false, false)?;
                 let constant = self.add_constant(Constant::Function(def));
                 self.emit(Op::Closure(constant));
             }
             ExprKind::Arrow(function) => {
-                let def = self.compile_function(function, false, false, false)?;
+                let def = self.compile_child_function(function, false, false, false)?;
                 let constant = self.add_constant(Constant::Function(def));
                 self.emit(Op::Closure(constant));
             }
@@ -466,7 +466,7 @@ impl Compiler {
                 } => {
                     self.emit(Op::Dup);
                     self.compile_key_name(key)?;
-                    let def = self.compile_function(function, false, false, false)?;
+                    let def = self.compile_child_function(function, false, false, false)?;
                     let constant = self.add_constant(Constant::Function(def));
                     self.emit(Op::Closure(constant));
                     match kind {

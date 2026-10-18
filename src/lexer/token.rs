@@ -1,8 +1,6 @@
 //! Token types. The token set mirrors the `TOK_*` enum of QuickJS
 //! (quickjs.c:22100).
 
-use std::fmt;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Punct {
     LBrace,
@@ -192,16 +190,11 @@ impl Token {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{message} at {line}:{column}")]
 pub struct LexError {
     pub message: String,
     pub line: usize,
     pub column: usize,
     pub offset: usize,
-}
-
-impl fmt::Display for LexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} at {}:{}", self.message, self.line, self.column)
-    }
 }

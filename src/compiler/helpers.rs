@@ -1,4 +1,4 @@
-//! Free helper functions: name collection, rguments usage analysis,
+//! Free helper functions: name collection, rguments usage analysis,
 //! static-key extraction and operator tables.
 
 use super::*;

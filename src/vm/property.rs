@@ -9,6 +9,7 @@ use std::rc::Rc;
 use super::ValueStack;
 use super::call::call_value;
 use super::ops::pop;
+use crate::bytecode::{Constant, FunctionDef};
 use crate::object::{PropCache, PropKey, Property, ResolvedProperty};
 use crate::runtime::Realm;
 use crate::value::{JsResult, JsValue};
@@ -91,6 +92,86 @@ pub fn get_value_property(realm: &mut Realm, value: &JsValue, key: &PropKey) -> 
     }
 }
 
+/// Constant-key get with a single cache borrow: the site key lives in the
+/// cache, so a hit never rebuilds or clones it. QuickJS keeps the same
+/// pre-interned atom plus property offset in JSPropCacheEntry.
+#[inline]
+pub(crate) fn cached_get_const(
+    realm: &mut Realm,
+    object: &JsValue,
+    definition: &crate::bytecode::FunctionDef,
+    index: u32,
+    cache: &std::cell::RefCell<PropCache>,
+) -> JsResult<JsValue> {
+    if let JsValue::Object(object_ref) = object {
+        let data = object_ref.borrow();
+        let entry = cache.borrow();
+        if entry.valid
+            && entry.object_shape == data.shape
+            && entry.own
+            && let Some(key) = &entry.key
+            && let Some((cached_key, property)) = data.props.get_index(entry.index as usize)
+            && cached_key == key
+        {
+            let getter = property.get.as_deref().cloned();
+            let value = property.value.clone();
+            drop(entry);
+            drop(data);
+            return match getter {
+                Some(getter) => call_value(realm, getter, object.clone(), &[]),
+                None => Ok(value),
+            };
+        }
+    }
+    let key = property_key_from_constant(definition, index)?;
+    cache.borrow_mut().key = Some(key.clone());
+    cached_get_property(realm, object, &key, cache)
+}
+
+/// Constant-key set with the same single-borrow fast path.
+#[inline]
+pub(crate) fn cached_set_const(
+    realm: &mut Realm,
+    object: &JsValue,
+    definition: &crate::bytecode::FunctionDef,
+    index: u32,
+    value: &JsValue,
+    cache: &std::cell::RefCell<PropCache>,
+) -> JsResult<()> {
+    if let JsValue::Object(object_ref) = object {
+        let mut data = object_ref.borrow_mut();
+        let entry = cache.borrow();
+        if entry.valid
+            && entry.own
+            && entry.object_shape == data.shape
+            && let Some(key) = &entry.key
+            && data
+                .props
+                .get_index(entry.index as usize)
+                .is_some_and(|(cached_key, _)| cached_key == key)
+        {
+            let index = entry.index as usize;
+            if let Some((_, property)) = data.props.get_index_mut(index) {
+                if property.is_accessor() {
+                    let setter = property.set.as_deref().cloned();
+                    drop(entry);
+                    drop(data);
+                    if let Some(setter) = setter {
+                        call_value(realm, setter, object.clone(), std::slice::from_ref(value))?;
+                    }
+                    return Ok(());
+                }
+                if property.writable {
+                    property.value = value.clone();
+                }
+                return Ok(());
+            }
+        }
+    }
+    let key = property_key_from_constant(definition, index)?;
+    cache.borrow_mut().key = Some(key.clone());
+    cached_set_property(realm, object, &key, value, cache)
+}
 /// Monomorphic property get. Shape checks plus a weak holder reference make
 /// the cached `IndexMap` slot valid without hashing the property name again.
 #[inline]
@@ -456,4 +537,16 @@ pub(crate) fn global_get(
 pub(crate) fn pop_property_key(realm: &mut Realm, stack: &mut ValueStack) -> JsResult<PropKey> {
     let value = pop(stack)?;
     super::to_property_key(realm, value)
+}
+
+pub(crate) fn property_key_from_constant(
+    definition: &FunctionDef,
+    index: u32,
+) -> JsResult<PropKey> {
+    match definition.constants.get(index as usize) {
+        Some(Constant::String(value)) => Ok(crate::object::key_from_string(value.clone())),
+        Some(Constant::Int(value)) => Ok(PropKey::from(value.to_string())),
+        Some(Constant::Number(value)) => Ok(PropKey::from(super::format_number(*value))),
+        _ => Err(JsValue::string("InternalError: invalid property constant")),
+    }
 }

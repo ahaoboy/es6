@@ -17,7 +17,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// stack can lower it; the CLI raises the stack and keeps this generous.
 pub const DEFAULT_MAX_CALL_DEPTH: usize = 8000;
 
-#[derive(Clone)]
+#[derive(Clone, thiserror::Error)]
+#[error("{message}")]
 pub struct Error {
     message: String,
     value: JsValue,
@@ -86,14 +87,6 @@ impl fmt::Debug for Error {
         write!(f, "{}", self.message)
     }
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for Error {}
 
 impl From<JsValue> for Error {
     fn from(value: JsValue) -> Self {

@@ -163,10 +163,6 @@ pub(crate) fn require_object(realm: &Realm, value: &JsValue) -> JsResult<Object>
         .ok_or_else(|| realm.type_error("Expected an object"))
 }
 
-pub(crate) fn this_object(realm: &Realm, this: &JsValue) -> JsResult<Object> {
-    require_object(realm, this)
-}
-
 /// The `this` value as a string, sharing the atom allocation instead of
 /// copying: string primitives and boxed strings hand back their `JsString`
 /// (QuickJS does the same with its `JSString *` payload).

@@ -9,6 +9,13 @@ use crate::parser::ParseError;
 struct ScopeFrame {
     bindings: HashMap<String, u16>,
     size: u16,
+    /// Shared with every child compiler that received this frame through
+    /// `capture_frames`: set once a nested function captures one of its
+    /// bindings. QuickJS derives the same information in `resolve_variables`
+    /// (quickjs.c:35111) and only boxes captured variables; this port keeps
+    /// whole-frame environments but avoids creating them at all when nothing
+    /// is captured.
+    captured: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl ScopeFrame {
@@ -16,6 +23,7 @@ impl ScopeFrame {
         Self {
             bindings: HashMap::new(),
             size: 0,
+            captured: std::rc::Rc::new(std::cell::Cell::new(false)),
         }
     }
 
@@ -117,6 +125,8 @@ struct Compiler {
     prop_caches: Vec<crate::object::PropCache>,
     local_frames: Vec<ScopeFrame>,
     captured_frames: Vec<ScopeFrame>,
+    /// This function reads a captured parent binding: it must route its
+    /// variable accesses through the environment chain.
     used_captured: bool,
     script: bool,
     strict: bool,
@@ -125,8 +135,12 @@ struct Compiler {
     try_depth: usize,
     finally_stack: Vec<Vec<Stmt>>,
     temp_counter: usize,
+    simple_params: u16,
     source_name: String,
     super_allowed: bool,
+    /// A nested function was compiled that itself needs an environment; the
+    /// current function must then provide the environment chain link.
+    needs_env_link: bool,
 }
 
 impl Compiler {
@@ -147,8 +161,10 @@ impl Compiler {
             try_depth: 0,
             finally_stack: Vec::new(),
             temp_counter: 0,
+            simple_params: 0,
             source_name,
             super_allowed: false,
+            needs_env_link: false,
         }
     }
 
@@ -164,11 +180,14 @@ impl Compiler {
         if !matches!(self.code.last(), Some(Op::Return | Op::ReturnUndefined)) {
             self.emit(Op::ReturnUndefined);
         }
+        // An environment is needed only when a binding is actually captured
+        // by a nested function, or when a nested function itself needs an
+        // environment chain link (its `use_env`). This replaces the earlier
+        // "creates any closure" over-approximation.
         let use_env = self.used_captured
-            || self
-                .code
-                .iter()
-                .any(|op| matches!(op, Op::Closure(_) | Op::CreateClass(_)));
+            || self.local_frames[0].captured.get()
+            || self.local_frames.iter().any(|frame| frame.captured.get())
+            || self.needs_env_link;
         FunctionDef {
             name: Rc::from(name),
             code: self.code,
@@ -187,6 +206,7 @@ impl Compiler {
             is_generator,
             strict,
             is_class_fields: name == "<class_fields>",
+            simple_params: self.simple_params,
             source: self.source_name,
             name_atom: std::cell::RefCell::new(None),
         }
@@ -301,6 +321,9 @@ impl Compiler {
         for (index, frame) in self.captured_frames.iter().enumerate() {
             if let Some(slot) = frame.bindings.get(name) {
                 self.used_captured = true;
+                // Mark the defining frame so the ancestor compiler knows it
+                // must materialize an environment for this binding.
+                frame.captured.set(true);
                 return Some(VarRef {
                     depth: (local_len + index) as u16,
                     slot: *slot,
@@ -371,6 +394,20 @@ impl Compiler {
         Ok(())
     }
 
+    pub(super) fn compile_child_function(
+        &mut self,
+        function: &Function,
+        is_constructor: bool,
+        super_allowed: bool,
+        is_declaration: bool,
+    ) -> Result<Rc<FunctionDef>, ParseError> {
+        let def = self.compile_function(function, is_constructor, super_allowed, is_declaration)?;
+        if def.use_env {
+            self.needs_env_link = true;
+        }
+        Ok(def)
+    }
+
     fn compile_function(
         &mut self,
         function: &Function,
@@ -421,24 +458,24 @@ impl Compiler {
                 child.local_frames[0].declare(&name);
             }
         }
+        // Leading plain identifiers are pre-filled into slots 0..n by the
+        // frame prologue (Frame::begin), removing one dispatch per
+        // parameter; anything after the first non-simple parameter keeps the
+        // bytecode path (defaults, patterns, rest).
+        let simple_params = function
+            .params
+            .iter()
+            .take_while(|param| matches!(param, Pattern::Ident(_)))
+            .count() as u16;
+        child.simple_params = simple_params;
         for (index, param) in function.params.iter().enumerate() {
+            if (index as u16) < simple_params {
+                continue;
+            }
             match param {
                 Pattern::Rest(inner) => {
                     child.emit(Op::RestArgs(index as u16));
                     child.bind_pattern(inner, BindingMode::Auto)?;
-                }
-                // Simple parameters bind straight into their slot.
-                Pattern::Ident(name) => {
-                    if let Some(reference) = child.resolve(name) {
-                        child.emit(Op::LoadArgInto {
-                            arg: index as u16,
-                            depth: reference.depth,
-                            slot: reference.slot,
-                        });
-                    } else {
-                        child.emit(Op::LoadArg(index as u16));
-                        child.bind_pattern(param, BindingMode::Auto)?;
-                    }
                 }
                 _ => {
                     child.emit(Op::LoadArg(index as u16));
@@ -508,7 +545,7 @@ impl Compiler {
             let Some(name) = &function.name else {
                 continue;
             };
-            let def = self.compile_function(function, false, false, true)?;
+            let def = self.compile_child_function(function, false, false, true)?;
             let constant = self.add_constant(Constant::Function(def));
             self.emit(Op::Closure(constant));
             self.store_ident(name, BindingMode::Auto);
