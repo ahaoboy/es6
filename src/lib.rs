@@ -18,6 +18,30 @@
 //! returning; hosts driving their own event loop can use
 //! [`Context::execute_pending_job`] and [`Context::run_jobs`].
 
+/// Cargo package version, e.g. `0.1.0`.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Abbreviated git commit hash embedded at compile time. A dirty worktree
+/// adds a `-modified` suffix; `unknown` is used outside a git checkout.
+/// Tags are excluded so this is always a commit hash, not a `git describe`
+/// tag description.
+pub const GIT_COMMIT_HASH: &str = git_version::git_version!(
+    args = [
+        "--always",
+        "--abbrev=12",
+        "--dirty=-modified",
+        "--exclude=*"
+    ],
+    fallback = "unknown"
+);
+
+/// Combined version string: `<cargo-version>+<commit>`.
+pub const VERSION_STRING: &str = const_str::concat!(VERSION, "+", GIT_COMMIT_HASH);
+
+/// Human-readable product string, e.g. `es6 0.1.0+7e7939305a98`.
+pub const VERSION_INFO: &str =
+    const_str::concat!(env!("CARGO_PKG_NAME"), " ", VERSION, "+", GIT_COMMIT_HASH);
+
 mod api;
 pub mod ast;
 pub mod builtins;

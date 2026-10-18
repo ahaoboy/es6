@@ -11,7 +11,7 @@ use miette::{Diagnostic, LabeledSpan, NamedSource, Report, SourceCode};
 
 /// A small ECMAScript engine with a QuickJS-style bytecode VM.
 #[derive(Debug, Parser)]
-#[command(name = "es6", version, about, long_about = None)]
+#[command(name = "es6", version = es6::VERSION_STRING, about, long_about = None)]
 struct Cli {
     /// Script file to execute. Reads stdin when omitted.
     #[arg(value_name = "FILE", conflicts_with = "eval")]

@@ -29,6 +29,8 @@ sysinfo = { version = "0.39", optional = true, default-features = false, feature
 ] }
 clap = { version = "4", features = ["derive"], optional = true }
 miette = { version = "7", features = ["fancy"], optional = true }
+git-version = "0.3.9"
+const-str = "1.1.0"
 
 [[bin]]
 name = "es6"
