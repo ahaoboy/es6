@@ -505,16 +505,13 @@ impl Compiler {
                 child.local_frames[0].declare(&name);
             }
         }
-        let arguments_slot = if function.is_arrow || !function_uses_arguments(function) {
-            None
-        } else {
+        let uses_arguments = !function.is_arrow && function_uses_arguments(function);
+        if uses_arguments {
             child.local_frames[0].declare("arguments");
             let slot = child.local_frames[0].slot_ref("arguments");
             child.emit(Op::Arguments);
             child.emit(Op::SetVar { depth: 0, slot });
-            Some(())
-        };
-        let _ = arguments_slot;
+        }
         // Named function expressions bind their own name in the function
         // scope so the body can self-reference it, like QuickJS' function
         // scope var for named expressions (`js_parse_function_decl2`,

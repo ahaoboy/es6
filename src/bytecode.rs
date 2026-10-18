@@ -67,8 +67,8 @@ pub struct FunctionDef {
     /// the frame at entry. Precomputed so the call path does not compare
     /// function names.
     pub is_class_fields: bool,
-    /// Leading simple parameters pre-filled into slots ..simple_params by
-    /// the frame prologue (QuickJS copies arguments into rg_buf the same
+    /// Leading simple parameters pre-filled into slots 0..simple_params by
+    /// the frame prologue (QuickJS copies arguments into arg_buf the same
     /// way, quickjs.c:18132).
     pub simple_params: u16,
     pub source: String,
