@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -36,12 +37,25 @@ pub struct FunctionDef {
     /// Source byte offset for each opcode, used for diagnostics.
     pub positions: Vec<u32>,
     pub constants: Vec<Constant>,
+    pub prop_caches: Vec<RefCell<crate::object::PropCache>>,
     pub env_size: u16,
+    /// True when this function creates closures/classes that can capture its
+    /// frame. QuickJS likewise only materializes `var_refs` for captured
+    /// variables; uncaptured locals stay in stack slots (`JSStackFrame`).
+    pub use_env: bool,
     pub length: u32,
     pub is_arrow: bool,
     pub is_async: bool,
     pub strict: bool,
     pub source: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 /// Stack-machine bytecode modeled after QuickJS' opcode set
@@ -80,14 +94,51 @@ pub enum Op {
     SetProp,
     SetPropKeep,
     DeleteProp,
-    GetPropConst(u32),
-    SetPropConst(u32),
-    SetPropConstKeep(u32),
+    /// `object[index]` where both operands are resolved locals.
+    GetIndexVar {
+        object_depth: u16,
+        object_slot: u16,
+        index_depth: u16,
+        index_slot: u16,
+    },
+    /// `object[index] = value` where both targets are resolved locals.
+    SetIndexVar {
+        object_depth: u16,
+        object_slot: u16,
+        index_depth: u16,
+        index_slot: u16,
+    },
+    /// `object[++index]` / `object[index++]`.
+    GetIndexUpdate {
+        object_depth: u16,
+        object_slot: u16,
+        index_depth: u16,
+        index_slot: u16,
+        delta: i8,
+        prefix: bool,
+    },
+    GetPropConst {
+        key: u32,
+        cache: u32,
+    },
+    SetPropConst {
+        key: u32,
+        cache: u32,
+    },
+    SetPropConstKeep {
+        key: u32,
+        cache: u32,
+    },
     DefineAccessor {
         is_getter: bool,
     },
 
     NewObject,
+    /// Object literal with static keys: `count` values are on the stack.
+    NewObjectFrom {
+        keys: u32,
+        count: u16,
+    },
     NewArray(u32),
     ArrayPush,
     ArraySpread,
@@ -148,6 +199,49 @@ pub enum Op {
     Void,
     Await,
 
+    /// `dst += src` for two resolved variables, fused from
+    /// `GetVar/GetVar/Add/Dup/SetVar`.
+    AddVar {
+        dst_depth: u16,
+        dst_slot: u16,
+        src_depth: u16,
+        src_slot: u16,
+    },
+    /// `left + right` for two resolved locals, pushing the result.
+    AddVars {
+        left_depth: u16,
+        left_slot: u16,
+        right_depth: u16,
+        right_slot: u16,
+    },
+    /// Comparison of a local with a constant, pushing a boolean.
+    CompareVarConst {
+        op: CompareOp,
+        depth: u16,
+        slot: u16,
+        value: u32,
+    },
+    /// Comparison of two locals, pushing a boolean.
+    CompareVars {
+        op: CompareOp,
+        left_depth: u16,
+        left_slot: u16,
+        right_depth: u16,
+        right_slot: u16,
+    },
+    /// Increment/decrement a local and jump, with the result discarded.
+    UpdateVarJump {
+        depth: u16,
+        slot: u16,
+        delta: i8,
+        target: usize,
+    },
+    /// `local + constant`, pushing the result.
+    AddVarConst {
+        depth: u16,
+        slot: u16,
+        value: u32,
+    },
     IncVar {
         depth: u16,
         slot: u16,

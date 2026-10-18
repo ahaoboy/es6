@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::ast::*;
-use crate::bytecode::{ClassDef, ClassMethod, Constant, FunctionDef, Op};
+use crate::bytecode::{ClassDef, ClassMethod, CompareOp, Constant, FunctionDef, Op};
 use crate::parser::ParseError;
 
 #[derive(Clone)]
@@ -30,6 +30,7 @@ impl ScopeFrame {
     }
 }
 
+#[derive(Clone, Copy)]
 struct VarRef {
     depth: u16,
     slot: u16,
@@ -80,8 +81,10 @@ struct Compiler {
     positions: Vec<u32>,
     span: Span,
     constants: Vec<Constant>,
+    prop_caches: Vec<crate::object::PropCache>,
     local_frames: Vec<ScopeFrame>,
     captured_frames: Vec<ScopeFrame>,
+    used_captured: bool,
     script: bool,
     strict: bool,
     breakables: Vec<BreakContext>,
@@ -100,8 +103,10 @@ impl Compiler {
             positions: Vec::new(),
             span: Span::default(),
             constants: Vec::new(),
+            prop_caches: Vec::new(),
             local_frames: vec![ScopeFrame::new()],
             captured_frames,
+            used_captured: false,
             script,
             strict: false,
             breakables: Vec::new(),
@@ -125,12 +130,23 @@ impl Compiler {
         if !matches!(self.code.last(), Some(Op::Return | Op::ReturnUndefined)) {
             self.emit(Op::ReturnUndefined);
         }
+        let use_env = self.used_captured
+            || self
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::Closure(_) | Op::CreateClass(_)));
         FunctionDef {
             name: Rc::from(name),
             code: self.code,
             positions: self.positions,
             constants: self.constants,
+            prop_caches: self
+                .prop_caches
+                .into_iter()
+                .map(std::cell::RefCell::new)
+                .collect(),
             env_size: self.local_frames[0].size,
+            use_env,
             length,
             is_arrow,
             is_async,
@@ -193,7 +209,29 @@ impl Compiler {
         self.add_constant(Constant::String(Rc::from(value)))
     }
 
-    fn resolve(&self, name: &str) -> Option<VarRef> {
+    fn add_prop_cache(&mut self) -> u32 {
+        let index = self.prop_caches.len() as u32;
+        self.prop_caches.push(crate::object::PropCache::default());
+        index
+    }
+
+    fn emit_get_prop_const(&mut self, name: &str) {
+        let key = self.string_constant(name);
+        let cache = self.add_prop_cache();
+        self.emit(Op::GetPropConst { key, cache });
+    }
+
+    fn emit_set_prop_const(&mut self, name: &str, keep: bool) {
+        let key = self.string_constant(name);
+        let cache = self.add_prop_cache();
+        self.emit(if keep {
+            Op::SetPropConstKeep { key, cache }
+        } else {
+            Op::SetPropConst { key, cache }
+        });
+    }
+
+    fn resolve(&mut self, name: &str) -> Option<VarRef> {
         let local_len = self.local_frames.len();
         for (index, frame) in self.local_frames.iter().enumerate().rev() {
             if let Some(slot) = frame.bindings.get(name) {
@@ -205,6 +243,7 @@ impl Compiler {
         }
         for (index, frame) in self.captured_frames.iter().enumerate() {
             if let Some(slot) = frame.bindings.get(name) {
+                self.used_captured = true;
                 return Some(VarRef {
                     depth: (local_len + index) as u16,
                     slot: *slot,
@@ -280,7 +319,7 @@ impl Compiler {
                 child.local_frames[0].declare(&name);
             }
         }
-        let arguments_slot = if function.is_arrow {
+        let arguments_slot = if function.is_arrow || !function_uses_arguments(function) {
             None
         } else {
             let slot = child.local_frames[0].declare("arguments");
@@ -753,11 +792,31 @@ impl Compiler {
         self.loops.push(loop_context);
         self.compile_statement(body)?;
         let continue_target = self.position();
-        if let Some(update) = update {
-            self.compile_expr(update)?;
-            self.emit(Op::Pop);
+        let mut jumped = false;
+        if let Some(update) = update
+            && let ExprKind::Update { op, argument, .. } = &update.kind
+            && let ExprKind::Ident(name) = &argument.kind
+            && let Some(reference) = self.resolve(name)
+        {
+            self.emit(Op::UpdateVarJump {
+                depth: reference.depth,
+                slot: reference.slot,
+                delta: if matches!(op, UpdateOp::Increment) {
+                    1
+                } else {
+                    -1
+                },
+                target: start,
+            });
+            jumped = true;
         }
-        self.emit(Op::Jump(start));
+        if !jumped {
+            if let Some(update) = update {
+                self.compile_expr(update)?;
+                self.emit(Op::Pop);
+            }
+            self.emit(Op::Jump(start));
+        }
         let loop_context = self.loops.pop().unwrap();
         let break_context = self.breakables.pop().unwrap();
         let end = self.position();
@@ -1127,7 +1186,9 @@ impl Compiler {
                 positions: vec![class.span.start as u32; code.len()],
                 code,
                 constants: Vec::new(),
+                prop_caches: Vec::new(),
                 env_size: 0,
+                use_env: false,
                 length: 0,
                 is_arrow: false,
                 is_async: false,
@@ -1223,6 +1284,65 @@ impl Compiler {
                 argument,
             } => self.compile_update(*op, *prefix, argument)?,
             ExprKind::Binary { op, left, right } => {
+                if *op == BinaryOp::Add
+                    && let ExprKind::Ident(left_name) = &left.kind
+                    && let Some(left_ref) = self.resolve(left_name)
+                {
+                    if let ExprKind::Ident(right_name) = &right.kind
+                        && let Some(right_ref) = self.resolve(right_name)
+                    {
+                        self.emit(Op::AddVars {
+                            left_depth: left_ref.depth,
+                            left_slot: left_ref.slot,
+                            right_depth: right_ref.depth,
+                            right_slot: right_ref.slot,
+                        });
+                        return Ok(());
+                    }
+                    if let ExprKind::Literal(Literal::Number(value)) = &right.kind {
+                        let index = self.add_constant(Constant::Number(*value));
+                        self.emit(Op::AddVarConst {
+                            depth: left_ref.depth,
+                            slot: left_ref.slot,
+                            value: index,
+                        });
+                        return Ok(());
+                    }
+                }
+                let compare = match op {
+                    BinaryOp::Lt => Some(CompareOp::Lt),
+                    BinaryOp::Le => Some(CompareOp::Le),
+                    BinaryOp::Gt => Some(CompareOp::Gt),
+                    BinaryOp::Ge => Some(CompareOp::Ge),
+                    _ => None,
+                };
+                if let Some(compare) = compare
+                    && let ExprKind::Ident(left_name) = &left.kind
+                    && let Some(left_ref) = self.resolve(left_name)
+                {
+                    if let ExprKind::Ident(right_name) = &right.kind
+                        && let Some(right_ref) = self.resolve(right_name)
+                    {
+                        self.emit(Op::CompareVars {
+                            op: compare,
+                            left_depth: left_ref.depth,
+                            left_slot: left_ref.slot,
+                            right_depth: right_ref.depth,
+                            right_slot: right_ref.slot,
+                        });
+                        return Ok(());
+                    }
+                    if let ExprKind::Literal(Literal::Number(value)) = &right.kind {
+                        let value = self.add_constant(Constant::Number(*value));
+                        self.emit(Op::CompareVarConst {
+                            op: compare,
+                            depth: left_ref.depth,
+                            slot: left_ref.slot,
+                            value,
+                        });
+                        return Ok(());
+                    }
+                }
                 self.compile_expr(left)?;
                 self.compile_expr(right)?;
                 self.emit(binary_op(*op));
@@ -1287,9 +1407,56 @@ impl Compiler {
                 } else if *optional {
                     self.compile_optional_member(object, property)?;
                 } else {
-                    self.compile_expr(object)?;
-                    self.compile_member_key(property)?;
-                    self.emit(Op::GetProp);
+                    let mut fused = false;
+                    if let MemberProperty::Computed(index) = property
+                        && let ExprKind::Ident(object_name) = &object.kind
+                        && let Some(object_ref) = self.resolve(object_name)
+                    {
+                        if let ExprKind::Ident(index_name) = &index.kind
+                            && let Some(index_ref) = self.resolve(index_name)
+                        {
+                            self.emit(Op::GetIndexVar {
+                                object_depth: object_ref.depth,
+                                object_slot: object_ref.slot,
+                                index_depth: index_ref.depth,
+                                index_slot: index_ref.slot,
+                            });
+                            fused = true;
+                        } else if let ExprKind::Update {
+                            op,
+                            prefix,
+                            argument,
+                        } = &index.kind
+                            && let ExprKind::Ident(index_name) = &argument.kind
+                            && let Some(index_ref) = self.resolve(index_name)
+                        {
+                            self.emit(Op::GetIndexUpdate {
+                                object_depth: object_ref.depth,
+                                object_slot: object_ref.slot,
+                                index_depth: index_ref.depth,
+                                index_slot: index_ref.slot,
+                                delta: if matches!(op, UpdateOp::Increment) {
+                                    1
+                                } else {
+                                    -1
+                                },
+                                prefix: *prefix,
+                            });
+                            fused = true;
+                        }
+                    }
+                    if !fused {
+                        self.compile_expr(object)?;
+                        match property {
+                            MemberProperty::Ident(name) => {
+                                self.emit_get_prop_const(name);
+                            }
+                            MemberProperty::Computed(expression) => {
+                                self.compile_expr(expression)?;
+                                self.emit(Op::GetProp);
+                            }
+                        }
+                    }
                 }
             }
             ExprKind::Call {
@@ -1396,6 +1563,42 @@ impl Compiler {
     }
 
     fn compile_object_literal(&mut self, properties: &[ObjectProperty]) -> Result<(), ParseError> {
+        if !properties.is_empty() {
+            let mut keys = Vec::with_capacity(properties.len());
+            let mut static_keys = true;
+            for property in properties {
+                match property {
+                    ObjectProperty::KeyValue { key, .. } => {
+                        if let Some(name) = static_property_name(key) {
+                            keys.push(Rc::from(name));
+                        } else {
+                            static_keys = false;
+                            break;
+                        }
+                    }
+                    ObjectProperty::Shorthand(name) => keys.push(Rc::from(name.as_str())),
+                    _ => {
+                        static_keys = false;
+                        break;
+                    }
+                }
+            }
+            if static_keys {
+                for property in properties {
+                    match property {
+                        ObjectProperty::KeyValue { value, .. } => self.compile_expr(value)?,
+                        ObjectProperty::Shorthand(name) => self.emit_ident_load(name),
+                        _ => unreachable!(),
+                    }
+                }
+                let keys = self.add_constant(Constant::Strings(Rc::from(keys)));
+                self.emit(Op::NewObjectFrom {
+                    keys,
+                    count: properties.len() as u16,
+                });
+                return Ok(());
+            }
+        }
         self.emit(Op::NewObject);
         for property in properties {
             match property {
@@ -1479,8 +1682,15 @@ impl Compiler {
         self.compile_expr(object)?;
         self.emit(Op::Dup);
         let nullish_jump = self.emit_jump(Op::JumpIfNullishKeep(0));
-        self.compile_member_key(property)?;
-        self.emit(Op::GetProp);
+        match property {
+            MemberProperty::Ident(name) => {
+                self.emit_get_prop_const(name);
+            }
+            MemberProperty::Computed(expression) => {
+                self.compile_expr(expression)?;
+                self.emit(Op::GetProp);
+            }
+        }
         let end_jump = self.emit_jump(Op::Jump(0));
         let nullish = self.position();
         self.patch_jump(nullish_jump, nullish);
@@ -1503,8 +1713,15 @@ impl Compiler {
         self.emit(Op::Dup);
         let nullish_jump = self.emit_jump(Op::JumpIfNullishKeep(0));
         self.emit(Op::Dup);
-        self.compile_member_key(property)?;
-        self.emit(Op::GetProp);
+        match property {
+            MemberProperty::Ident(name) => {
+                self.emit_get_prop_const(name);
+            }
+            MemberProperty::Computed(expression) => {
+                self.compile_expr(expression)?;
+                self.emit(Op::GetProp);
+            }
+        }
         if has_spread {
             self.compile_arguments_array(arguments)?;
             self.emit(Op::CallMethodSpread);
@@ -1541,8 +1758,15 @@ impl Compiler {
         {
             self.compile_expr(object)?;
             self.emit(Op::Dup);
-            self.compile_member_key(property)?;
-            self.emit(Op::GetProp);
+            match property {
+                MemberProperty::Ident(name) => {
+                    self.emit_get_prop_const(name);
+                }
+                MemberProperty::Computed(expression) => {
+                    self.compile_expr(expression)?;
+                    self.emit(Op::GetProp);
+                }
+            }
             self.emit(Op::Dup);
             let nullish_jump = self.emit_jump(Op::JumpIfNullishKeep(0));
             if has_spread {
@@ -1655,8 +1879,15 @@ impl Compiler {
             }
             self.compile_expr(object)?;
             self.emit(Op::Dup);
-            self.compile_member_key(property)?;
-            self.emit(Op::GetProp);
+            match property {
+                MemberProperty::Ident(name) => {
+                    self.emit_get_prop_const(name);
+                }
+                MemberProperty::Computed(expression) => {
+                    self.compile_expr(expression)?;
+                    self.emit(Op::GetProp);
+                }
+            }
             if has_spread {
                 self.compile_arguments_array(arguments)?;
                 self.emit(Op::CallMethodSpread);
@@ -1863,6 +2094,19 @@ impl Compiler {
                     self.patch_jump(jump, end);
                     return Ok(());
                 }
+                if op == AssignOp::Add
+                    && let ExprKind::Ident(source) = &value.kind
+                    && let Some(dst) = reference
+                    && let Some(src) = self.resolve(source)
+                {
+                    self.emit(Op::AddVar {
+                        dst_depth: dst.depth,
+                        dst_slot: dst.slot,
+                        src_depth: src.depth,
+                        src_slot: src.slot,
+                    });
+                    return Ok(());
+                }
                 self.emit_ident_load(name);
                 self.compile_expr(value)?;
                 self.emit(assign_binary_op(op));
@@ -1873,7 +2117,37 @@ impl Compiler {
             ExprKind::Member {
                 object, property, ..
             } => {
+                if op == AssignOp::Assign
+                    && let MemberProperty::Computed(index) = property
+                    && let ExprKind::Ident(object_name) = &object.kind
+                    && let ExprKind::Ident(index_name) = &index.kind
+                    && let Some(object_ref) = self.resolve(object_name)
+                    && let Some(index_ref) = self.resolve(index_name)
+                    && expr_is_stable(value)
+                {
+                    self.compile_expr(value)?;
+                    self.emit(Op::SetIndexVar {
+                        object_depth: object_ref.depth,
+                        object_slot: object_ref.slot,
+                        index_depth: index_ref.depth,
+                        index_slot: index_ref.slot,
+                    });
+                    return Ok(());
+                }
                 self.compile_expr(object)?;
+                if let MemberProperty::Ident(name) = property {
+                    if op == AssignOp::Assign {
+                        self.compile_expr(value)?;
+                        self.emit_set_prop_const(name, false);
+                        return Ok(());
+                    }
+                    self.emit(Op::Dup);
+                    self.emit_get_prop_const(name);
+                    self.compile_expr(value)?;
+                    self.emit(assign_binary_op(op));
+                    self.emit_set_prop_const(name, false);
+                    return Ok(());
+                }
                 self.compile_member_key(property)?;
                 if op == AssignOp::Assign {
                     self.compile_expr(value)?;
@@ -1912,9 +2186,14 @@ impl Compiler {
                 let (depth, slot) = self.alloc_temp();
                 self.emit(Op::SetVar { depth, slot });
                 self.compile_expr(object)?;
-                self.compile_member_key(property)?;
-                self.emit(Op::GetVar { depth, slot });
-                self.emit(Op::SetProp);
+                if let MemberProperty::Ident(name) = property {
+                    self.emit(Op::GetVar { depth, slot });
+                    self.emit_set_prop_const(name, false);
+                } else {
+                    self.compile_member_key(property)?;
+                    self.emit(Op::GetVar { depth, slot });
+                    self.emit(Op::SetProp);
+                }
                 self.emit(Op::Pop);
             }
             ExprKind::Array(_) | ExprKind::Object(_) => {
@@ -2261,6 +2540,235 @@ fn has_use_strict(statements: &[Stmt]) -> bool {
             ..
         })) if value == "use strict"
     )
+}
+
+/// True when the function body can observe its own `arguments` binding.
+/// Nested non-arrow functions have their own binding and are skipped; arrows
+/// capture the enclosing one and are traversed.
+fn function_uses_arguments(function: &Function) -> bool {
+    match &function.body {
+        FunctionBody::Block(statements) => statements.iter().any(uses_arguments_stmt),
+        FunctionBody::Expr(expression) => uses_arguments_expr(expression),
+    }
+}
+
+fn uses_arguments_stmt(statement: &Stmt) -> bool {
+    match &statement.kind {
+        StmtKind::Empty | StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Debugger => false,
+        StmtKind::Expr(expression) | StmtKind::Throw(expression) => uses_arguments_expr(expression),
+        StmtKind::Block(statements) => statements.iter().any(uses_arguments_stmt),
+        StmtKind::Var(declaration) => declaration.declarations.iter().any(|declarator| {
+            declarator.init.as_ref().is_some_and(uses_arguments_expr)
+                || uses_arguments_pattern(&declarator.pattern)
+        }),
+        StmtKind::Function(function) => function.is_arrow && function_uses_arguments(function),
+        StmtKind::Class(class) => uses_arguments_class(class),
+        StmtKind::If {
+            test,
+            consequent,
+            alternate,
+        } => {
+            uses_arguments_expr(test)
+                || uses_arguments_stmt(consequent)
+                || alternate.as_deref().is_some_and(uses_arguments_stmt)
+        }
+        StmtKind::While { test, body } | StmtKind::DoWhile { test, body } => {
+            uses_arguments_expr(test) || uses_arguments_stmt(body)
+        }
+        StmtKind::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            init.as_ref().is_some_and(uses_arguments_for_init)
+                || test.as_ref().is_some_and(uses_arguments_expr)
+                || update.as_ref().is_some_and(uses_arguments_expr)
+                || uses_arguments_stmt(body)
+        }
+        StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body } => {
+            uses_arguments_for_init(left) || uses_arguments_expr(right) || uses_arguments_stmt(body)
+        }
+        StmtKind::Return(expression) => expression.as_ref().is_some_and(uses_arguments_expr),
+        StmtKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            block.iter().any(uses_arguments_stmt)
+                || handler.as_ref().is_some_and(|handler| {
+                    handler.param.as_ref().is_some_and(uses_arguments_pattern)
+                        || handler.body.iter().any(uses_arguments_stmt)
+                })
+                || finalizer
+                    .as_ref()
+                    .is_some_and(|statements| statements.iter().any(uses_arguments_stmt))
+        }
+        StmtKind::Switch {
+            discriminant,
+            cases,
+        } => {
+            uses_arguments_expr(discriminant)
+                || cases.iter().any(|case| {
+                    case.test.as_ref().is_some_and(uses_arguments_expr)
+                        || case.body.iter().any(uses_arguments_stmt)
+                })
+        }
+        StmtKind::Labeled { body, .. } => uses_arguments_stmt(body),
+    }
+}
+
+fn uses_arguments_for_init(init: &ForInit) -> bool {
+    match init {
+        ForInit::Var(declaration) => declaration.declarations.iter().any(|declarator| {
+            declarator.init.as_ref().is_some_and(uses_arguments_expr)
+                || uses_arguments_pattern(&declarator.pattern)
+        }),
+        ForInit::Expr(expression) => uses_arguments_expr(expression),
+    }
+}
+
+fn uses_arguments_pattern(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Ident(_) => false,
+        Pattern::Array(elements) => elements.iter().flatten().any(uses_arguments_pattern),
+        Pattern::Object(properties) => properties.iter().any(|property| {
+            matches!(&property.key, PropertyName::Computed(expression) if uses_arguments_expr(expression))
+                || uses_arguments_pattern(&property.value)
+        }),
+        Pattern::Rest(inner) => uses_arguments_pattern(inner),
+        Pattern::Assign { target, default } => {
+            uses_arguments_pattern(target) || uses_arguments_expr(default)
+        }
+    }
+}
+
+fn uses_arguments_class(class: &ClassDecl) -> bool {
+    class.super_class.as_deref().is_some_and(uses_arguments_expr)
+        || class.elements.iter().any(|element| {
+            matches!(&element.key, PropertyName::Computed(expression) if uses_arguments_expr(expression))
+        })
+}
+
+fn uses_arguments_expr(expression: &Expr) -> bool {
+    match &expression.kind {
+        ExprKind::Ident(name) => name == "arguments",
+        ExprKind::Literal(_) | ExprKind::This => false,
+        ExprKind::Array(elements) => elements.iter().any(|element| match element {
+            ArrayElement::Hole => false,
+            ArrayElement::Expr(expression) | ArrayElement::Spread(expression) => {
+                uses_arguments_expr(expression)
+            }
+        }),
+        ExprKind::Object(properties) => properties.iter().any(|property| match property {
+            ObjectProperty::KeyValue { key, value } => {
+                matches!(key, PropertyName::Computed(expression) if uses_arguments_expr(expression))
+                    || uses_arguments_expr(value)
+            }
+            ObjectProperty::Shorthand(name) => name == "arguments",
+            ObjectProperty::Method { key, function, .. } => {
+                (matches!(key, PropertyName::Computed(expression) if uses_arguments_expr(expression)))
+                    || (function.is_arrow && function_uses_arguments(function))
+            }
+            ObjectProperty::Spread(expression) => uses_arguments_expr(expression),
+        }),
+        ExprKind::Function(function) => function.is_arrow && function_uses_arguments(function),
+        ExprKind::Arrow(function) => function_uses_arguments(function),
+        ExprKind::Class(class) => uses_arguments_class(class),
+        ExprKind::Unary { argument, .. }
+        | ExprKind::Update { argument, .. }
+        | ExprKind::Spread(argument)
+        | ExprKind::Await(argument) => uses_arguments_expr(argument),
+        ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            uses_arguments_expr(left) || uses_arguments_expr(right)
+        }
+        ExprKind::Assign { target, value, .. } => {
+            uses_arguments_expr(target) || uses_arguments_expr(value)
+        }
+        ExprKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            uses_arguments_expr(test)
+                || uses_arguments_expr(consequent)
+                || uses_arguments_expr(alternate)
+        }
+        ExprKind::Sequence(expressions) => expressions.iter().any(uses_arguments_expr),
+        ExprKind::Member {
+            object, property, ..
+        } => {
+            uses_arguments_expr(object)
+                || matches!(property, MemberProperty::Computed(index) if uses_arguments_expr(index))
+        }
+        ExprKind::Call {
+            callee, arguments, ..
+        }
+        | ExprKind::New { callee, arguments } => {
+            uses_arguments_expr(callee)
+                || arguments.iter().any(|argument| match argument {
+                    Argument::Expr(expression) | Argument::Spread(expression) => {
+                        uses_arguments_expr(expression)
+                    }
+                })
+        }
+        ExprKind::Template { expressions, .. } => expressions.iter().any(uses_arguments_expr),
+        ExprKind::TaggedTemplate {
+            tag, expressions, ..
+        } => uses_arguments_expr(tag) || expressions.iter().any(uses_arguments_expr),
+        ExprKind::Yield(expression) => expression.as_deref().is_some_and(uses_arguments_expr),
+    }
+}
+
+/// Whether evaluating `expression` may reassign locals or invoke user code
+/// that could change the object/index variables of a fused indexed store.
+fn expr_is_stable(expression: &Expr) -> bool {
+    match &expression.kind {
+        ExprKind::Literal(_) | ExprKind::Ident(_) | ExprKind::This => true,
+        ExprKind::Unary { argument, .. } => expr_is_stable(argument),
+        ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            expr_is_stable(left) && expr_is_stable(right)
+        }
+        ExprKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => expr_is_stable(test) && expr_is_stable(consequent) && expr_is_stable(alternate),
+        ExprKind::Sequence(expressions) => expressions.iter().all(expr_is_stable),
+        ExprKind::Array(elements) => elements.iter().all(|element| match element {
+            ArrayElement::Hole => true,
+            ArrayElement::Expr(expression) => expr_is_stable(expression),
+            ArrayElement::Spread(_) => false,
+        }),
+        ExprKind::Object(properties) => properties.iter().all(|property| match property {
+            ObjectProperty::KeyValue { key, value } => {
+                !matches!(key, PropertyName::Computed(_)) && expr_is_stable(value)
+            }
+            ObjectProperty::Shorthand(_) => true,
+            ObjectProperty::Spread(_) | ObjectProperty::Method { .. } => false,
+        }),
+        ExprKind::Member {
+            object, property, ..
+        } => {
+            expr_is_stable(object)
+                && match property {
+                    MemberProperty::Ident(_) => true,
+                    MemberProperty::Computed(index) => expr_is_stable(index),
+                }
+        }
+        ExprKind::Assign { .. }
+        | ExprKind::Update { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::New { .. }
+        | ExprKind::Function(_)
+        | ExprKind::Arrow(_)
+        | ExprKind::Class(_)
+        | ExprKind::Template { .. }
+        | ExprKind::TaggedTemplate { .. }
+        | ExprKind::Spread(_)
+        | ExprKind::Await(_)
+        | ExprKind::Yield(_) => false,
+    }
 }
 
 fn static_property_name(name: &PropertyName) -> Option<String> {

@@ -152,6 +152,10 @@ pub struct Realm {
     /// `JSContext.job_list` and drains it with `JS_ExecutePendingJob`
     /// (quickjs.c:23952).
     pub(crate) jobs: VecDeque<crate::vm::Job>,
+    /// Recycled activation records, analogous to reusing `JSStackFrame`
+    /// storage on QuickJS' value stack.
+    #[allow(clippy::vec_box)]
+    pub(crate) frames: Vec<Box<crate::vm::Frame>>,
 }
 
 impl Realm {
@@ -226,6 +230,7 @@ impl Realm {
             symbol_registry: std::collections::HashMap::new(),
             well_known_symbols: std::collections::HashMap::new(),
             jobs: VecDeque::new(),
+            frames: Vec::new(),
         };
         builtins::install(&mut realm);
         realm
@@ -318,6 +323,8 @@ impl Realm {
             kind: ObjectKind::Iterator { items, index: 0 },
             extensible: true,
             class_name: "Iterator",
+            shape: 0,
+            is_prototype: false,
         });
         let next = self.native_function("next", 0, iterator_next);
         iterator

@@ -28,6 +28,7 @@ impl Env {
         })
     }
 
+    #[inline(always)]
     pub fn get(&self, depth: usize, slot: usize) -> JsValue {
         let mut env = self;
         for _ in 0..depth {
@@ -43,6 +44,7 @@ impl Env {
             .unwrap_or(JsValue::Undefined)
     }
 
+    #[inline(always)]
     pub fn set(&self, depth: usize, slot: usize, value: JsValue) {
         let mut env = self;
         for _ in 0..depth {

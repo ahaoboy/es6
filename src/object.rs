@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
@@ -13,6 +14,35 @@ use crate::value::{EnvRef, JsResult, JsValue};
 
 pub type ObjRef = Rc<RefCell<ObjectData>>;
 pub type NativeFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue>>;
+
+/// Monomorphic property cache for one constant access site. It mirrors
+/// QuickJS' `JSPropCacheEntry`: the receiver shape guards the prototype chain,
+/// while a weak holder reference keeps the cached slot alive and verifiable.
+#[derive(Clone, Default)]
+pub struct PropCache {
+    pub object_shape: u64,
+    pub holder: Option<Weak<RefCell<ObjectData>>>,
+    pub holder_shape: u64,
+    pub receiver_proto: Option<Weak<RefCell<ObjectData>>>,
+    pub prototype_generation: u64,
+    pub index: u32,
+    /// Shape before a new own property was inserted, used to define the same
+    /// property on the next object of the same shape.
+    pub insert_shape: u64,
+    pub can_insert: bool,
+    pub own: bool,
+    pub valid: bool,
+}
+
+static PROTOTYPE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub fn prototype_generation() -> u64 {
+    PROTOTYPE_GENERATION.load(Ordering::Relaxed)
+}
+
+pub fn bump_prototype_generation() {
+    PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
 
 #[derive(Clone, Debug)]
 pub enum PropKey {
@@ -399,16 +429,25 @@ pub struct ObjectData {
     pub kind: ObjectKind,
     pub extensible: bool,
     pub class_name: &'static str,
+    /// Monotonic property-shape version. Structural changes (insert/delete,
+    /// prototype change) invalidate inline caches, mirroring QuickJS shapes.
+    pub shape: u64,
+    /// Set when this object appears in another object's prototype chain.
+    /// Structural changes on prototypes invalidate monomorphic property
+    /// caches that may have observed them.
+    pub is_prototype: bool,
 }
 
 impl ObjectData {
     pub fn ordinary(prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: PropertyMap::with_capacity_and_hasher(4, FxBuildHasher),
             prototype,
             kind: ObjectKind::Ordinary,
             extensible: true,
             class_name: "Object",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -420,6 +459,8 @@ impl ObjectData {
             kind: ObjectKind::Array(ArrayData { items, length }),
             extensible: true,
             class_name: "Array",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -434,6 +475,8 @@ impl ObjectData {
             kind: ObjectKind::Function(function),
             extensible: true,
             class_name: "Function",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -444,6 +487,8 @@ impl ObjectData {
             kind: ObjectKind::BoxedString(value),
             extensible: true,
             class_name: "String",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -454,6 +499,8 @@ impl ObjectData {
             kind: ObjectKind::BoxedNumber(value),
             extensible: true,
             class_name: "Number",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -464,6 +511,8 @@ impl ObjectData {
             kind: ObjectKind::BoxedBool(value),
             extensible: true,
             class_name: "Boolean",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -474,6 +523,8 @@ impl ObjectData {
             kind: ObjectKind::Map(entries),
             extensible: true,
             class_name: "Map",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -489,6 +540,8 @@ impl ObjectData {
             })),
             extensible: true,
             class_name: "Promise",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -499,6 +552,8 @@ impl ObjectData {
             kind: ObjectKind::Set(values),
             extensible: true,
             class_name: "Set",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -509,6 +564,8 @@ impl ObjectData {
             kind: ObjectKind::Error,
             extensible: true,
             class_name: "Error",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -519,6 +576,8 @@ impl ObjectData {
             kind: ObjectKind::ArrayBuffer(ArrayBufferData { bytes }),
             extensible: true,
             class_name: "ArrayBuffer",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -540,6 +599,8 @@ impl ObjectData {
             }),
             extensible: true,
             class_name: "DataView",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -551,6 +612,8 @@ impl ObjectData {
             kind: ObjectKind::TypedArray(data),
             extensible: true,
             class_name,
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -561,6 +624,8 @@ impl ObjectData {
             kind: ObjectKind::Date(value),
             extensible: true,
             class_name: "Date",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -571,6 +636,8 @@ impl ObjectData {
             kind: ObjectKind::RegExp(data),
             extensible: true,
             class_name: "RegExp",
+            shape: 0,
+            is_prototype: false,
         }
     }
 
@@ -608,6 +675,10 @@ impl ObjectData {
     }
 
     pub fn define(&mut self, key: impl Into<PropKey>, property: Property) {
+        self.shape = self.shape.wrapping_add(1);
+        if self.is_prototype {
+            PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
         self.props.insert(key.into().canonical(), property);
     }
 
@@ -617,6 +688,46 @@ impl ObjectData {
 
     pub fn get_own(&self, key: &PropKey) -> Option<&Property> {
         self.property(key)
+    }
+
+    /// Fast indexed array/typed-array read used by the VM before it builds a
+    /// `PropKey`. QuickJS hits the same inline element path first.
+    #[inline(always)]
+    pub fn get_index_value(&self, index: i32) -> Option<JsValue> {
+        if index < 0 {
+            return None;
+        }
+        let index = index as usize;
+        match &self.kind {
+            ObjectKind::Array(data) if index < data.length => Some(data.items[index].clone()),
+            ObjectKind::TypedArray(data) if index < data.length => Some(data.get(index)),
+            _ => None,
+        }
+    }
+
+    /// Fast indexed array/typed-array write. Returns false when the receiver
+    /// is not an indexed object and the generic property path must run.
+    #[inline(always)]
+    pub fn set_index_value(&mut self, index: i32, value: &JsValue) -> bool {
+        if index < 0 {
+            return false;
+        }
+        let index = index as usize;
+        match &mut self.kind {
+            ObjectKind::Array(data) => {
+                if index >= data.items.len() {
+                    data.items.resize(index + 1, JsValue::Undefined);
+                }
+                data.items[index] = value.clone();
+                data.length = data.length.max(index + 1);
+                true
+            }
+            ObjectKind::TypedArray(data) => {
+                data.set(index, value);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn has_own(&self, key: &PropKey) -> bool {
@@ -858,6 +969,10 @@ impl ObjectData {
             }
         }
         if self.extensible {
+            self.shape = self.shape.wrapping_add(1);
+            if self.is_prototype {
+                PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+            }
             self.props.insert(key.canonical(), Property::data(value));
         }
         Ok(())
@@ -939,7 +1054,14 @@ impl ObjectData {
                 return false;
             }
         }
-        self.props.shift_remove(&key.canonical()).is_some()
+        let removed = self.props.shift_remove(&key.canonical()).is_some();
+        if removed {
+            self.shape = self.shape.wrapping_add(1);
+            if self.is_prototype {
+                PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        removed
     }
 
     pub fn own_keys(&self) -> Vec<PropKey> {
@@ -982,6 +1104,11 @@ impl ObjectData {
     }
 
     pub fn set_proto(&mut self, proto: Option<ObjRef>) {
+        self.shape = self.shape.wrapping_add(1);
+        if let Some(proto) = &proto {
+            proto.borrow_mut().is_prototype = true;
+        }
+        PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.prototype = proto;
     }
 }
@@ -1035,14 +1162,20 @@ impl Object {
             data.length = data.length.max(index + 1);
             return;
         }
+        object.shape = object.shape.wrapping_add(1);
+        if object.is_prototype {
+            PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
         object.props.insert(key.canonical(), Property::data(value));
     }
 
     pub fn set_key(&self, key: PropKey, value: JsValue) {
-        self.inner
-            .borrow_mut()
-            .props
-            .insert(key.canonical(), Property::data(value));
+        let mut object = self.inner.borrow_mut();
+        object.shape = object.shape.wrapping_add(1);
+        if object.is_prototype {
+            PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
+        object.props.insert(key.canonical(), Property::data(value));
     }
 
     pub fn define(&self, key: &str, property: Property) {

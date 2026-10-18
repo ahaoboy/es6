@@ -19,11 +19,19 @@ pub fn to_boolean(value: &JsValue) -> bool {
 /// ECMAScript `ToNumeric` for arithmetic operators: objects are first
 /// converted with `ToPrimitive` (hint number). QuickJS performs the same
 /// two-stage conversion in `JS_ToNumberHintFree`/`js_unary_arith_slow`.
+#[inline(always)]
 pub fn to_numeric(realm: &mut Realm, value: JsValue) -> JsResult<f64> {
+    if let JsValue::Int(value) = value {
+        return Ok(value as f64);
+    }
+    if let JsValue::Float(value) = value {
+        return Ok(value);
+    }
     let value = to_primitive(realm, value)?;
     to_number(value)
 }
 
+#[inline(always)]
 pub fn to_number(value: JsValue) -> JsResult<f64> {
     Ok(match value {
         JsValue::Undefined => f64::NAN,
@@ -232,6 +240,9 @@ pub fn to_property_key(realm: &mut Realm, value: JsValue) -> JsResult<PropKey> {
 }
 
 pub fn add_values(realm: &mut Realm, left: JsValue, right: JsValue) -> JsResult<JsValue> {
+    if let (Some(left), Some(right)) = (left.as_number(), right.as_number()) {
+        return Ok(JsValue::number(left + right));
+    }
     let left = to_primitive(realm, left)?;
     let right = to_primitive(realm, right)?;
     if matches!(left, JsValue::String(_)) || matches!(right, JsValue::String(_)) {
@@ -362,6 +373,17 @@ pub(crate) fn abstract_compare(
     left: &JsValue,
     right: &JsValue,
 ) -> JsResult<Option<i32>> {
+    if let (Some(left), Some(right)) = (left.as_number(), right.as_number()) {
+        return Ok(if left < right {
+            Some(-1)
+        } else if left > right {
+            Some(1)
+        } else if left == right {
+            Some(0)
+        } else {
+            None
+        });
+    }
     let left = to_primitive(realm, left.clone())?;
     let right = to_primitive(realm, right.clone())?;
     if let (JsValue::String(left), JsValue::String(right)) = (&left, &right) {
