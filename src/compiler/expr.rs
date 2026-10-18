@@ -164,6 +164,9 @@ impl Compiler {
                 property,
                 optional,
             } => {
+                if expr_has_optional(expression) && !chain_has_super(expression) {
+                    return self.compile_optional_chain(expression, false);
+                }
                 if matches!(&object.kind, ExprKind::Ident(name) if name == "super")
                     && self.super_allowed
                 {
@@ -234,6 +237,9 @@ impl Compiler {
                 arguments,
                 optional,
             } => {
+                if expr_has_optional(expression) && !chain_has_super(expression) {
+                    return self.compile_optional_chain(expression, false);
+                }
                 self.compile_call(callee, arguments, false, *optional, false)?;
             }
             ExprKind::New { callee, arguments } => {
@@ -845,6 +851,248 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile an optional chain (`a?.b.c`, `a?.b()`, `a?.()`) with a single
+    /// short-circuit target: a nullish link skips every remaining link and
+    /// evaluates to `undefined`.
+    pub(super) fn compile_optional_chain(
+        &mut self,
+        expression: &Expr,
+        delete: bool,
+    ) -> Result<(), ParseError> {
+        self.span = expression.span;
+        let mut links = Vec::new();
+        let mut base = expression;
+        loop {
+            match &base.kind {
+                ExprKind::Member {
+                    object,
+                    property,
+                    optional,
+                } => {
+                    links.push(ChainLink::Member {
+                        property,
+                        optional: *optional,
+                    });
+                    base = object;
+                }
+                ExprKind::Call {
+                    callee,
+                    arguments,
+                    optional,
+                } => {
+                    links.push(ChainLink::Call {
+                        arguments,
+                        optional: *optional,
+                    });
+                    base = callee;
+                }
+                _ => break,
+            }
+        }
+        links.reverse();
+        self.compile_expr(base)?;
+        let mut end_jumps = Vec::new();
+        if delete {
+            match links.pop() {
+                Some(ChainLink::Member { property, optional }) => {
+                    self.compile_chain_links(&links, true, &mut end_jumps)?;
+                    self.chain_delete_tail(property, optional, &mut end_jumps)?;
+                }
+                Some(tail @ ChainLink::Call { .. }) => {
+                    links.push(tail);
+                    self.compile_chain_links(&links, true, &mut end_jumps)?;
+                    self.emit(Op::Pop);
+                    self.emit(Op::True);
+                }
+                None => {
+                    self.emit(Op::Pop);
+                    self.emit(Op::True);
+                }
+            }
+        } else {
+            self.compile_chain_links(&links, false, &mut end_jumps)?;
+        }
+        let end = self.position();
+        for jump in end_jumps {
+            self.patch_jump(jump, end);
+        }
+        Ok(())
+    }
+
+    fn compile_chain_links(
+        &mut self,
+        links: &[ChainLink],
+        short: bool,
+        end_jumps: &mut Vec<usize>,
+    ) -> Result<(), ParseError> {
+        let mut index = 0;
+        while index < links.len() {
+            match &links[index] {
+                ChainLink::Member { property, optional } => {
+                    let method = matches!(links.get(index + 1), Some(ChainLink::Call { .. }));
+                    self.chain_member(property, *optional, method, short, end_jumps)?;
+                    if method {
+                        let ChainLink::Call {
+                            arguments,
+                            optional,
+                        } = &links[index + 1]
+                        else {
+                            unreachable!()
+                        };
+                        self.chain_call(arguments, *optional, true, short, end_jumps)?;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+                ChainLink::Call {
+                    arguments,
+                    optional,
+                } => {
+                    self.chain_call(arguments, *optional, false, short, end_jumps)?;
+                    index += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `delete a?.b`: the short-circuit result is `true` (the deletion
+    /// succeeded), and the computed key is not evaluated when the chain
+    /// short-circuits.
+    fn chain_delete_tail(
+        &mut self,
+        property: &MemberProperty,
+        optional: bool,
+        end_jumps: &mut Vec<usize>,
+    ) -> Result<(), ParseError> {
+        if optional {
+            self.emit(Op::Dup);
+            let nullish = self.emit_jump(Op::JumpIfNullishKeep(0));
+            self.compile_member_key(property)?;
+            self.emit(Op::DeleteProp);
+            let skip = self.emit_jump(Op::Jump(0));
+            let cleanup = self.position();
+            self.patch_jump(nullish, cleanup);
+            self.emit(Op::Pop);
+            self.emit(Op::Pop);
+            self.emit(Op::True);
+            end_jumps.push(self.emit_jump(Op::Jump(0)));
+            let after = self.position();
+            self.patch_jump(skip, after);
+        } else {
+            self.compile_member_key(property)?;
+            self.emit(Op::DeleteProp);
+        }
+        Ok(())
+    }
+
+    fn chain_member(
+        &mut self,
+        property: &MemberProperty,
+        optional: bool,
+        keep_receiver: bool,
+        short: bool,
+        end_jumps: &mut Vec<usize>,
+    ) -> Result<(), ParseError> {
+        if optional {
+            self.emit(Op::Dup);
+            let nullish = self.emit_jump(Op::JumpIfNullishKeep(0));
+            self.emit_member_read(property, keep_receiver)?;
+            let skip = self.emit_jump(Op::Jump(0));
+            let cleanup = self.position();
+            self.patch_jump(nullish, cleanup);
+            // The nullish path kept the object and its duplicate.
+            self.emit(Op::Pop);
+            self.emit(Op::Pop);
+            self.emit(if short { Op::True } else { Op::Undefined });
+            end_jumps.push(self.emit_jump(Op::Jump(0)));
+            let after = self.position();
+            self.patch_jump(skip, after);
+        } else {
+            self.emit_member_read(property, keep_receiver)?;
+        }
+        Ok(())
+    }
+
+    fn emit_member_read(
+        &mut self,
+        property: &MemberProperty,
+        keep_receiver: bool,
+    ) -> Result<(), ParseError> {
+        if keep_receiver {
+            self.emit(Op::Dup);
+        }
+        match property {
+            MemberProperty::Ident(name) => self.emit_get_prop_const(name),
+            MemberProperty::Computed(expression) => {
+                self.compile_expr(expression)?;
+                self.emit(Op::GetProp);
+            }
+        }
+        Ok(())
+    }
+
+    fn chain_call(
+        &mut self,
+        arguments: &[Argument],
+        optional: bool,
+        is_method: bool,
+        short: bool,
+        end_jumps: &mut Vec<usize>,
+    ) -> Result<(), ParseError> {
+        if optional {
+            self.emit(Op::Dup);
+            let nullish = self.emit_jump(Op::JumpIfNullishKeep(0));
+            self.emit_call_arguments(arguments, is_method)?;
+            let skip = self.emit_jump(Op::Jump(0));
+            let cleanup = self.position();
+            self.patch_jump(nullish, cleanup);
+            // A method call keeps receiver + method + duplicate on the stack.
+            let pops = if is_method { 3 } else { 2 };
+            for _ in 0..pops {
+                self.emit(Op::Pop);
+            }
+            self.emit(if short { Op::True } else { Op::Undefined });
+            end_jumps.push(self.emit_jump(Op::Jump(0)));
+            let after = self.position();
+            self.patch_jump(skip, after);
+        } else {
+            self.emit_call_arguments(arguments, is_method)?;
+        }
+        Ok(())
+    }
+
+    fn emit_call_arguments(
+        &mut self,
+        arguments: &[Argument],
+        is_method: bool,
+    ) -> Result<(), ParseError> {
+        let has_spread = arguments
+            .iter()
+            .any(|argument| matches!(argument, Argument::Spread(_)));
+        if has_spread {
+            self.compile_arguments_array(arguments)?;
+            self.emit(if is_method {
+                Op::CallMethodSpread
+            } else {
+                Op::CallSpread
+            });
+        } else {
+            for argument in arguments {
+                if let Argument::Expr(expression) = argument {
+                    self.compile_expr(expression)?;
+                }
+            }
+            self.emit(if is_method {
+                Op::CallMethod(arguments.len() as u16)
+            } else {
+                Op::Call(arguments.len() as u16)
+            });
+        }
+        Ok(())
+    }
+
     /// `local.prop` / `this.prop` superinstruction: emits the fused read and
     /// returns `Some(true)` when it applies. No operand ordering concerns
     /// exist for pure reads.
@@ -954,9 +1202,13 @@ impl Compiler {
                 ExprKind::Member {
                     object, property, ..
                 } => {
-                    self.compile_expr(object)?;
-                    self.compile_member_key(property)?;
-                    self.emit(Op::DeleteProp);
+                    if expr_has_optional(argument) && !chain_has_super(argument) {
+                        self.compile_optional_chain(argument, true)?;
+                    } else {
+                        self.compile_expr(object)?;
+                        self.compile_member_key(property)?;
+                        self.emit(Op::DeleteProp);
+                    }
                 }
                 ExprKind::Ident(name) => {
                     if let Some(reference) = self.resolve(name) {
@@ -1448,6 +1700,49 @@ fn callee_has_optional(expr: &Expr) -> bool {
                 || callee_has_optional(object)
                 || matches!(property, MemberProperty::Computed(inner) if callee_has_optional(inner))
         }
+        ExprKind::Call {
+            callee, optional, ..
+        } => *optional || callee_has_optional(callee),
+        _ => false,
+    }
+}
+
+/// One link of an optional chain, flattened from the innermost object to the
+/// outermost call.
+enum ChainLink<'a> {
+    Member {
+        property: &'a MemberProperty,
+        optional: bool,
+    },
+    Call {
+        arguments: &'a [Argument],
+        optional: bool,
+    },
+}
+
+/// Whether this expression is (part of) an optional chain.
+fn expr_has_optional(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Member {
+            object, optional, ..
+        } => *optional || expr_has_optional(object),
+        ExprKind::Call {
+            callee, optional, ..
+        } => *optional || expr_has_optional(callee),
+        _ => false,
+    }
+}
+
+/// Optional chains starting from `super` keep using the per-link path, which
+/// already handles `super.method()`. Their `this` binding needs the receiver
+/// rules of `CallSuperMethod`, not the generic chain call.
+fn chain_has_super(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Member { object, .. } => {
+            matches!(&object.kind, ExprKind::Ident(name) if name == "super")
+                || chain_has_super(object)
+        }
+        ExprKind::Call { callee, .. } => chain_has_super(callee),
         _ => false,
     }
 }

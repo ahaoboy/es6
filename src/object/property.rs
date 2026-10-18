@@ -196,7 +196,19 @@ impl ObjectData {
             data.items[index] = None;
             return true;
         }
-        self.remove(key)
+        match self.property(key) {
+            Some(property) => {
+                if !property.configurable {
+                    return false;
+                }
+                self.remove(key);
+                true
+            }
+            // Virtual exotic keys (array `length`, typed-array indices,
+            // boxed-string indices) are non-configurable; absent keys are
+            // not errors and delete reports success.
+            None => !self.has_own(key),
+        }
     }
 
     /// Own keys in spec order: integer indices ascending, then string keys

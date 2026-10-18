@@ -372,6 +372,9 @@ pub(crate) fn execute_op(
             let object = pop(&mut frame.stack)?;
             let deleted = match object {
                 JsValue::Object(object) => object.borrow_mut().delete_property(&key),
+                JsValue::Undefined | JsValue::Null => {
+                    return Err(realm.type_error("Cannot convert undefined or null to object"));
+                }
                 _ => true,
             };
             frame.stack.push(JsValue::Bool(deleted));
