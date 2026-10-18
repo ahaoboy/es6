@@ -3,8 +3,6 @@
 //! `iterable_items` drains an iterable eagerly for spread calls and array
 //! literals; QuickJS instead drives `Symbol.iterator` lazily with
 //! `OP_for_of_start`/`OP_for_of_next` (quickjs.c:19318) for loops.
-use std::rc::Rc;
-
 use super::call::call_value;
 use crate::object::{ObjectKind, PropKey};
 use crate::runtime::Realm;
@@ -65,7 +63,7 @@ pub fn iterable_items(realm: &mut Realm, value: JsValue) -> JsResult<Vec<JsValue
                 items.push(super::property::get_value_property(
                     realm,
                     &value,
-                    &PropKey::Str(Rc::from(index.to_string())),
+                    &PropKey::from(index.to_string()),
                 )?);
             }
             Ok(items)

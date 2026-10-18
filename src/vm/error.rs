@@ -19,8 +19,19 @@ pub fn range_error(realm: &Realm, message: impl Into<String>) -> JsValue {
 }
 
 pub(crate) fn stack_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("ES6_TRACE_STACK").is_some())
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = not probed, 1 = disabled, 2 = enabled. A relaxed load is cheap
+    // enough for the per-call path; probing the environment is not.
+    static TRACE: AtomicU8 = AtomicU8::new(0);
+    match TRACE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let enabled = std::env::var_os("ES6_TRACE_STACK").is_some();
+            TRACE.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+            enabled
+        }
+    }
 }
 
 pub(crate) fn push_call_stack(name: Rc<str>) {
@@ -73,11 +84,11 @@ fn display_error_value(value: &JsValue) -> String {
                 let name = data
                     .get_own_value(&PropKey::from("name"))
                     .and_then(|value| value.as_string())
-                    .unwrap_or_else(|| Rc::from("Error"));
+                    .unwrap_or_default();
                 let message = data
                     .get_own_value(&PropKey::from("message"))
                     .and_then(|value| value.as_string())
-                    .unwrap_or_else(|| Rc::from(""));
+                    .unwrap_or_default();
                 let text = if message.is_empty() {
                     name.to_string()
                 } else {

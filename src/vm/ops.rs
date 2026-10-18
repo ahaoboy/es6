@@ -25,8 +25,516 @@ use super::property::{
 
 /// Opcode dispatch. This is the Rust counterpart of the giant switch in
 /// QuickJS `JS_CallInternal` (quickjs.c:18051).
+/// Hot opcodes, inlined into the dispatch loop.
+///
+/// Keeping this subset small shrinks `run_loop`'s stack frame and callee-save
+/// set, which is paid on every JS call; everything else goes through the
+/// out-of-line [`execute_op`]. `Ok(None)` means "not a hot opcode".
 #[inline(always)]
-pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
+pub(crate) fn execute_hot(
+    realm: &mut Realm,
+    frame: &mut Frame,
+    pc: &mut usize,
+    op: Op,
+) -> JsResult<Option<Step>> {
+    let step = match op {
+        Op::Undefined => {
+            frame.stack.push(JsValue::Undefined);
+            Step::Continue
+        }
+        Op::Null => {
+            frame.stack.push(JsValue::Null);
+            Step::Continue
+        }
+        Op::True => {
+            frame.stack.push(JsValue::Bool(true));
+            Step::Continue
+        }
+        Op::False => {
+            frame.stack.push(JsValue::Bool(false));
+            Step::Continue
+        }
+        Op::Pop => {
+            pop(&mut frame.stack)?;
+            Step::Continue
+        }
+        Op::Dup => {
+            let value = peek(&frame.stack)?.clone();
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::LoadArg(index) => {
+            let value = frame
+                .arguments
+                .get(index as usize)
+                .cloned()
+                .unwrap_or(JsValue::Undefined);
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::GetVar { depth, slot } => {
+            frame.stack.push(frame.get_var(depth, slot));
+            Step::Continue
+        }
+        Op::SetVar { depth, slot } => {
+            let value = pop(&mut frame.stack)?;
+            frame.set_var(depth, slot, value);
+            Step::Continue
+        }
+        Op::PushConst(index) => match frame.definition.constants.get(index as usize) {
+            Some(Constant::Int(value)) => {
+                frame.stack.push(JsValue::Int(*value));
+                Step::Continue
+            }
+            _ => {
+                let value = constant_value(realm, &frame.definition, index, frame.env.as_ref())?;
+                frame.stack.push(value);
+                Step::Continue
+            }
+        },
+        Op::Jump(target) => {
+            *pc = target as usize;
+            Step::Continue
+        }
+        Op::JumpIfFalse(target) => {
+            let value = pop(&mut frame.stack)?;
+            if !super::to_boolean(&value) {
+                *pc = target as usize;
+            }
+            Step::Continue
+        }
+        Op::JumpIfTrue(target) => {
+            let value = pop(&mut frame.stack)?;
+            if super::to_boolean(&value) {
+                *pc = target as usize;
+            }
+            Step::Continue
+        }
+        Op::CompareVarsJump {
+            op,
+            left_depth,
+            left_slot,
+            right_depth,
+            right_slot,
+            jump_if_true,
+            target,
+        } => {
+            let left = frame.get_var(left_depth, left_slot);
+            let right = frame.get_var(right_depth, right_slot);
+            let result = if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+                compare_ints(*left, *right, op)
+            } else {
+                compare_values(realm, &left, &right, op)?
+            };
+            if result == jump_if_true {
+                *pc = target as usize;
+            }
+            Step::Continue
+        }
+        Op::CompareVarConstJump {
+            op,
+            depth,
+            slot,
+            value,
+            jump_if_true,
+            target,
+        } => {
+            let left = frame.get_var(depth, slot);
+            let result = match left {
+                JsValue::Int(left) => compare_ints(left, value, op),
+                left => {
+                    let right = JsValue::Int(value);
+                    compare_values(realm, &left, &right, op)?
+                }
+            };
+            if result == jump_if_true {
+                *pc = target as usize;
+            }
+            Step::Continue
+        }
+        Op::BitAndVarConstJump {
+            depth,
+            slot,
+            value,
+            jump_if_true,
+            target,
+        } => {
+            let left = frame.get_var(depth, slot);
+            let bits = match left {
+                JsValue::Int(left) => left,
+                left => int32_value(realm, left)?,
+            };
+            if (bits & value != 0) == jump_if_true {
+                *pc = target as usize;
+            }
+            Step::Continue
+        }
+        Op::ForNext {
+            depth,
+            slot,
+            delta,
+            limit_depth,
+            limit_slot,
+            op,
+            body,
+        } => {
+            let value = frame.get_var(depth, slot);
+            let next = match value {
+                JsValue::Int(value) => match value.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, delta as i32),
+                },
+                value => numeric_step(realm, value, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next.clone());
+            let limit = frame.get_var(limit_depth, limit_slot);
+            let result = if let (JsValue::Int(next), JsValue::Int(limit)) = (&next, &limit) {
+                compare_ints(*next, *limit, op)
+            } else {
+                compare_values(realm, &next, &limit, op)?
+            };
+            if result {
+                *pc = body as usize;
+            }
+            Step::Continue
+        }
+        Op::ForNextConst {
+            depth,
+            slot,
+            delta,
+            value,
+            op,
+            body,
+        } => {
+            let current = frame.get_var(depth, slot);
+            let next = match current {
+                JsValue::Int(current) => match current.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(current, delta as i32),
+                },
+                current => numeric_step(realm, current, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next.clone());
+            let result = match next {
+                JsValue::Int(next) => compare_ints(next, value, op),
+                next => compare_values(realm, &next, &JsValue::Int(value), op)?,
+            };
+            if result {
+                *pc = body as usize;
+            }
+            Step::Continue
+        }
+        Op::UpdateVarJump {
+            depth,
+            slot,
+            delta,
+            target,
+        } => {
+            let value = frame.get_var(depth, slot);
+            let next = match value {
+                JsValue::Int(value) => match value.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, delta as i32),
+                },
+                value => numeric_step(realm, value, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next);
+            *pc = target as usize;
+            Step::Continue
+        }
+        Op::UpdateVarDiscard { depth, slot, delta } => {
+            let value = frame.get_var(depth, slot);
+            let next = match value {
+                JsValue::Int(value) => match value.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, delta as i32),
+                },
+                value => numeric_step(realm, value, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next);
+            Step::Continue
+        }
+        Op::AddVar {
+            dst_depth,
+            dst_slot,
+            src_depth,
+            src_slot,
+        } => {
+            let left = frame.get_var(dst_depth, dst_slot);
+            let right = frame.get_var(src_depth, src_slot);
+            let value = match add_ints(&left, &right) {
+                Some(value) => value,
+                None => super::add_values(realm, left, right)?,
+            };
+            frame.set_var(dst_depth, dst_slot, value.clone());
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::AddVarDiscard {
+            dst_depth,
+            dst_slot,
+            src_depth,
+            src_slot,
+        } => {
+            let left = frame.get_var(dst_depth, dst_slot);
+            let right = frame.get_var(src_depth, src_slot);
+            let value = match add_ints(&left, &right) {
+                Some(value) => value,
+                None => super::add_values(realm, left, right)?,
+            };
+            frame.set_var(dst_depth, dst_slot, value);
+            Step::Continue
+        }
+        Op::AddVars {
+            left_depth,
+            left_slot,
+            right_depth,
+            right_slot,
+        } => {
+            let left = frame.get_var(left_depth, left_slot);
+            let right = frame.get_var(right_depth, right_slot);
+            let value = match add_ints(&left, &right) {
+                Some(value) => value,
+                None => super::add_values(realm, left, right)?,
+            };
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::Add => {
+            let right = pop(&mut frame.stack)?;
+            let left = pop(&mut frame.stack)?;
+            let value = match add_ints(&left, &right) {
+                Some(value) => value,
+                None => super::add_values(realm, left, right)?,
+            };
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::Sub => {
+            let right = pop(&mut frame.stack)?;
+            let left = pop(&mut frame.stack)?;
+            if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+                let value = *left as i64 - *right as i64;
+                let value = if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
+                    JsValue::Int(value as i32)
+                } else {
+                    int_sub_overflow(*left, *right)
+                };
+                frame.stack.push(value);
+            } else {
+                frame.stack.push(sub_slow(realm, left, right)?);
+            }
+            Step::Continue
+        }
+        Op::IncVar {
+            depth,
+            slot,
+            prefix,
+        } => {
+            let old = frame.get_var(depth, slot);
+            if let JsValue::Int(value) = old {
+                let new = match value.checked_add(1) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, 1),
+                };
+                frame.set_var(depth, slot, new.clone());
+                frame
+                    .stack
+                    .push(if prefix { new } else { JsValue::Int(value) });
+            } else {
+                let number = numeric_value(realm, old)?;
+                let new = float_step(number, 1.0);
+                frame.set_var(depth, slot, new.clone());
+                frame
+                    .stack
+                    .push(if prefix { new } else { float_value(number) });
+            }
+            Step::Continue
+        }
+        Op::DecVar {
+            depth,
+            slot,
+            prefix,
+        } => {
+            let old = frame.get_var(depth, slot);
+            if let JsValue::Int(value) = old {
+                let new = match value.checked_sub(1) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, -1),
+                };
+                frame.set_var(depth, slot, new.clone());
+                frame
+                    .stack
+                    .push(if prefix { new } else { JsValue::Int(value) });
+            } else {
+                let number = numeric_value(realm, old)?;
+                let new = float_step(number, -1.0);
+                frame.set_var(depth, slot, new.clone());
+                frame
+                    .stack
+                    .push(if prefix { new } else { float_value(number) });
+            }
+            Step::Continue
+        }
+        Op::GetProp => {
+            let key = pop(&mut frame.stack)?;
+            let object = pop(&mut frame.stack)?;
+            let value = get_element_value(realm, &object, key)?;
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::SetProp => {
+            let value = pop(&mut frame.stack)?;
+            let key = pop(&mut frame.stack)?;
+            let object = pop(&mut frame.stack)?;
+            set_element_value(realm, &object, key, value.clone())?;
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::SetPropKeep => {
+            let value = pop(&mut frame.stack)?;
+            let key = pop(&mut frame.stack)?;
+            let object = pop(&mut frame.stack)?;
+            set_element_value(realm, &object, key, value)?;
+            Step::Continue
+        }
+        Op::GetPropConst { key, cache } => {
+            let key = property_key_from_constant(&frame.definition, key)?;
+            let object = pop(&mut frame.stack)?;
+            let value = match frame.definition.prop_caches.get(cache as usize) {
+                Some(cache) => cached_get_property(realm, &object, &key, cache)?,
+                None => get_value_property(realm, &object, &key)?,
+            };
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::SetPropConst { key, cache } => {
+            let value = pop(&mut frame.stack)?;
+            let key = property_key_from_constant(&frame.definition, key)?;
+            let object = pop(&mut frame.stack)?;
+            match frame.definition.prop_caches.get(cache as usize) {
+                Some(cache) => cached_set_property(realm, &object, &key, &value, cache)?,
+                None => set_value_property(realm, &object, &key, value.clone(), true)?,
+            }
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::SetPropConstKeep { key, cache } => {
+            let value = pop(&mut frame.stack)?;
+            let key = property_key_from_constant(&frame.definition, key)?;
+            let object = pop(&mut frame.stack)?;
+            match frame.definition.prop_caches.get(cache as usize) {
+                Some(cache) => cached_set_property(realm, &object, &key, &value, cache)?,
+                None => set_value_property(realm, &object, &key, value, true)?,
+            }
+            frame.stack.push(object);
+            Step::Continue
+        }
+        Op::GetIndexVar {
+            object_depth,
+            object_slot,
+            index_depth,
+            index_slot,
+        } => {
+            let object = frame.get_var(object_depth, object_slot);
+            let index = frame.get_var(index_depth, index_slot);
+            let value = get_element_value(realm, &object, index)?;
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::SetIndexVar {
+            object_depth,
+            object_slot,
+            index_depth,
+            index_slot,
+        } => {
+            let value = pop(&mut frame.stack)?;
+            let object = frame.get_var(object_depth, object_slot);
+            let index = frame.get_var(index_depth, index_slot);
+            set_element_value(realm, &object, index, value.clone())?;
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::GetIndexUpdate {
+            object_depth,
+            object_slot,
+            index_depth,
+            index_slot,
+            delta,
+            prefix,
+        } => {
+            let object = frame.get_var(object_depth, object_slot);
+            let old = frame.get_var(index_depth, index_slot);
+            let new = match &old {
+                JsValue::Int(old) => match old.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(*old, delta as i32),
+                },
+                _ => numeric_step(realm, old.clone(), delta as f64)?,
+            };
+            frame.set_var(index_depth, index_slot, new.clone());
+            let key = if prefix { new } else { old };
+            let value = get_element_value(realm, &object, key)?;
+            frame.stack.push(value);
+            Step::Continue
+        }
+        Op::ArrayPush => {
+            let value = pop(&mut frame.stack)?;
+            let array = pop(&mut frame.stack)?;
+            if let JsValue::Object(object) = &array {
+                push_array_value(realm, object, value)?;
+            }
+            frame.stack.push(array);
+            Step::Continue
+        }
+        Op::CompareVars {
+            op,
+            left_depth,
+            left_slot,
+            right_depth,
+            right_slot,
+        } => {
+            let left = frame.get_var(left_depth, left_slot);
+            let right = frame.get_var(right_depth, right_slot);
+            let result = if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+                compare_ints(*left, *right, op)
+            } else {
+                compare_values(realm, &left, &right, op)?
+            };
+            frame.stack.push(JsValue::Bool(result));
+            Step::Continue
+        }
+        Op::TypeOf => {
+            let value = pop(&mut frame.stack)?;
+            frame.stack.push(JsValue::string(value.type_of()));
+            Step::Continue
+        }
+        Op::Return => return Ok(Some(Step::Return)),
+        Op::ReturnUndefined => {
+            frame.stack.push(JsValue::Undefined);
+            return Ok(Some(Step::Return));
+        }
+        Op::GetGlobal { name, cache } => {
+            let name = constant_string(&frame.definition, name);
+            let cache = &frame.definition.prop_caches[cache as usize];
+            match super::property::cached_global_get(realm, &name, cache)? {
+                Some(value) => frame.stack.push(value),
+                None => return Err(realm.reference_error(format!("{name} is not defined"))),
+            }
+            Step::Continue
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(step))
+}
+
+#[inline(never)]
+pub(crate) fn execute_op(
+    realm: &mut Realm,
+    frame: &mut Frame,
+    pc: &mut usize,
+    op: Op,
+) -> JsResult<Step> {
     match op {
         Op::Nop => {}
         Op::Undefined => frame.stack.push(JsValue::Undefined),
@@ -93,9 +601,10 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             let value = pop(&mut frame.stack)?;
             frame.set_var(depth, slot, value);
         }
-        Op::GetGlobal(index) => {
-            let name = constant_string(&frame.definition, index);
-            match super::property::global_get(realm, &name) {
+        Op::GetGlobal { name, cache } => {
+            let name = constant_string(&frame.definition, name);
+            let cache = &frame.definition.prop_caches[cache as usize];
+            match super::property::cached_global_get(realm, &name, cache)? {
                 Some(value) => frame.stack.push(value),
                 None => return Err(realm.reference_error(format!("{name} is not defined"))),
             }
@@ -387,47 +896,72 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             let value = construct_value(realm, constructor, &arguments)?;
             frame.stack.push(value);
         }
-        Op::Return => {
-            let value = pop(&mut frame.stack)?;
-            return Ok(Step::Return(value));
+        Op::Return => return Ok(Step::Return),
+        Op::ReturnUndefined => {
+            frame.stack.push(JsValue::Undefined);
+            return Ok(Step::Return);
         }
-        Op::ReturnUndefined => return Ok(Step::Return(JsValue::Undefined)),
         Op::Throw => {
             let value = pop(&mut frame.stack)?;
             return Err(value);
         }
-        Op::Jump(target) => frame.pc = target,
+        Op::Jump(target) => *pc = target as usize,
         Op::JumpIfFalse(target) => {
             let value = pop(&mut frame.stack)?;
             if !super::to_boolean(&value) {
-                frame.pc = target;
+                *pc = target as usize;
             }
         }
         Op::JumpIfTrue(target) => {
             let value = pop(&mut frame.stack)?;
             if super::to_boolean(&value) {
-                frame.pc = target;
+                *pc = target as usize;
             }
         }
         Op::JumpIfNotUndefined(target) => {
             let value = pop(&mut frame.stack)?;
             if !matches!(value, JsValue::Undefined) {
-                frame.pc = target;
+                *pc = target as usize;
             }
         }
         Op::JumpIfNullish(target) => {
             let value = pop(&mut frame.stack)?;
             if value.is_nullish() {
-                frame.pc = target;
+                *pc = target as usize;
             }
         }
         Op::JumpIfNullishKeep(target) => {
             let value = peek(&frame.stack)?;
             if value.is_nullish() {
-                frame.pc = target;
+                *pc = target as usize;
             } else {
                 pop(&mut frame.stack)?;
             }
+        }
+        Op::AddVarDiscard {
+            dst_depth,
+            dst_slot,
+            src_depth,
+            src_slot,
+        } => {
+            let left = frame.get_var(dst_depth, dst_slot);
+            let right = frame.get_var(src_depth, src_slot);
+            let value = match add_ints(&left, &right) {
+                Some(value) => value,
+                None => super::add_values(realm, left, right)?,
+            };
+            frame.set_var(dst_depth, dst_slot, value);
+        }
+        Op::UpdateVarDiscard { depth, slot, delta } => {
+            let value = frame.get_var(depth, slot);
+            let next = match value {
+                JsValue::Int(value) => match value.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, delta as i32),
+                },
+                value => numeric_step(realm, value, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next);
         }
         Op::AddVar {
             dst_depth,
@@ -437,10 +971,9 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         } => {
             let left = frame.get_var(dst_depth, dst_slot);
             let right = frame.get_var(src_depth, src_slot);
-            let value = add_ints(&left, &right).unwrap_or_else(|| JsValue::Undefined);
-            let value = match value {
-                JsValue::Undefined => super::add_values(realm, left, right)?,
-                value => value,
+            let value = match add_ints(&left, &right) {
+                Some(value) => value,
+                None => super::add_values(realm, left, right)?,
             };
             frame.set_var(dst_depth, dst_slot, value.clone());
             frame.stack.push(value);
@@ -491,6 +1024,43 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             let result = compare_values(realm, &left, &right, op)?;
             frame.stack.push(JsValue::Bool(result));
         }
+        Op::CompareVarsJump {
+            op,
+            left_depth,
+            left_slot,
+            right_depth,
+            right_slot,
+            jump_if_true,
+            target,
+        } => {
+            let left = frame.get_var(left_depth, left_slot);
+            let right = frame.get_var(right_depth, right_slot);
+            let result = if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+                compare_ints(*left, *right, op)
+            } else {
+                compare_values(realm, &left, &right, op)?
+            };
+            if result == jump_if_true {
+                *pc = target as usize;
+            }
+        }
+        Op::CompareVarConstJump {
+            op,
+            depth,
+            slot,
+            value,
+            jump_if_true,
+            target,
+        } => {
+            let left = frame.get_var(depth, slot);
+            let result = match left {
+                JsValue::Int(left) => compare_ints(left, value, op),
+                left => compare_values(realm, &left, &JsValue::Int(value), op)?,
+            };
+            if result == jump_if_true {
+                *pc = target as usize;
+            }
+        }
         Op::UpdateVarJump {
             depth,
             slot,
@@ -498,9 +1068,84 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             target,
         } => {
             let value = frame.get_var(depth, slot);
-            let number = super::to_numeric(realm, value)?;
-            frame.set_var(depth, slot, JsValue::number(number + delta as f64));
-            frame.pc = target;
+            let next = match value {
+                JsValue::Int(value) => match value.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, delta as i32),
+                },
+                value => numeric_step(realm, value, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next);
+            *pc = target as usize;
+        }
+        Op::ForNext {
+            depth,
+            slot,
+            delta,
+            limit_depth,
+            limit_slot,
+            op,
+            body,
+        } => {
+            let value = frame.get_var(depth, slot);
+            let next = match value {
+                JsValue::Int(value) => match value.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(value, delta as i32),
+                },
+                value => numeric_step(realm, value, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next.clone());
+            let limit = frame.get_var(limit_depth, limit_slot);
+            let result = if let (JsValue::Int(next), JsValue::Int(limit)) = (&next, &limit) {
+                compare_ints(*next, *limit, op)
+            } else {
+                compare_values(realm, &next, &limit, op)?
+            };
+            if result {
+                *pc = body as usize;
+            }
+        }
+        Op::ForNextConst {
+            depth,
+            slot,
+            delta,
+            value,
+            op,
+            body,
+        } => {
+            let current = frame.get_var(depth, slot);
+            let next = match current {
+                JsValue::Int(current) => match current.checked_add(delta as i32) {
+                    Some(value) => JsValue::Int(value),
+                    None => int_step_overflow(current, delta as i32),
+                },
+                current => numeric_step(realm, current, delta as f64)?,
+            };
+            frame.set_var(depth, slot, next.clone());
+            let result = match next {
+                JsValue::Int(next) => compare_ints(next, value, op),
+                next => compare_values(realm, &next, &JsValue::Int(value), op)?,
+            };
+            if result {
+                *pc = body as usize;
+            }
+        }
+        Op::BitAndVarConstJump {
+            depth,
+            slot,
+            value,
+            jump_if_true,
+            target,
+        } => {
+            let left = frame.get_var(depth, slot);
+            let bits = match left {
+                JsValue::Int(left) => left,
+                left => int32_value(realm, left)?,
+            };
+            if (bits & value != 0) == jump_if_true {
+                *pc = target as usize;
+            }
         }
         Op::Add => {
             let right = pop(&mut frame.stack)?;
@@ -644,7 +1289,7 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         }
         Op::TypeOfGlobal(index) => {
             let name = constant_string(&frame.definition, index);
-            let value = super::property::global_get(realm, &name);
+            let value = super::property::global_get(realm, &name).ok().flatten();
             frame.stack.push(JsValue::string(match value {
                 Some(value) => value.type_of(),
                 None => "undefined",
@@ -654,13 +1299,10 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             pop(&mut frame.stack)?;
             frame.stack.push(JsValue::Undefined);
         }
-        Op::Await => {
-            let value = pop(&mut frame.stack)?;
-            return Ok(Step::Await(value));
-        }
+        Op::Await => return Ok(Step::Await),
         Op::Yield(resume_pc) => {
-            let value = pop(&mut frame.stack)?;
-            return Ok(Step::Yield { value, resume_pc });
+            *pc = resume_pc as usize;
+            return Ok(Step::Yield);
         }
         Op::IncVar {
             depth,
@@ -669,13 +1311,16 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         } => {
             let old = frame.get_var(depth, slot);
             if let JsValue::Int(value) = old {
-                let new = JsValue::number(value as f64 + 1.0);
+                let new = match value.checked_add(1) {
+                    Some(value) => JsValue::Int(value),
+                    None => JsValue::number(value as f64 + 1.0),
+                };
                 frame.set_var(depth, slot, new.clone());
                 frame
                     .stack
                     .push(if prefix { new } else { JsValue::Int(value) });
             } else {
-                let number = super::to_numeric(realm, old)?;
+                let number = numeric_value(realm, old)?;
                 let new = JsValue::number(number + 1.0);
                 frame.set_var(depth, slot, new.clone());
                 frame
@@ -690,13 +1335,16 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         } => {
             let old = frame.get_var(depth, slot);
             if let JsValue::Int(value) = old {
-                let new = JsValue::number(value as f64 - 1.0);
+                let new = match value.checked_sub(1) {
+                    Some(value) => JsValue::Int(value),
+                    None => JsValue::number(value as f64 - 1.0),
+                };
                 frame.set_var(depth, slot, new.clone());
                 frame
                     .stack
                     .push(if prefix { new } else { JsValue::Int(value) });
             } else {
-                let number = super::to_numeric(realm, old)?;
+                let number = numeric_value(realm, old)?;
                 let new = JsValue::number(number - 1.0);
                 frame.set_var(depth, slot, new.clone());
                 frame
@@ -706,8 +1354,11 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         }
         Op::IncGlobal(index, prefix) => {
             let name = constant_string(&frame.definition, index);
-            let old = super::property::global_get(realm, &name).unwrap_or(JsValue::Undefined);
-            let number = super::to_numeric(realm, old)?;
+            let old = super::property::global_get(realm, &name)
+                .ok()
+                .flatten()
+                .unwrap_or(JsValue::Undefined);
+            let number = numeric_value(realm, old)?;
             let new = JsValue::number(number + 1.0);
             Object::from_ref(realm.global.clone()).set_key(PropKey::Str(name), new.clone());
             frame
@@ -716,8 +1367,11 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         }
         Op::DecGlobal(index, prefix) => {
             let name = constant_string(&frame.definition, index);
-            let old = super::property::global_get(realm, &name).unwrap_or(JsValue::Undefined);
-            let number = super::to_numeric(realm, old)?;
+            let old = super::property::global_get(realm, &name)
+                .ok()
+                .flatten()
+                .unwrap_or(JsValue::Undefined);
+            let number = numeric_value(realm, old)?;
             let new = JsValue::number(number - 1.0);
             Object::from_ref(realm.global.clone()).set_key(PropKey::Str(name), new.clone());
             frame
@@ -728,7 +1382,7 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             let key = pop_property_key(realm, &mut frame.stack)?;
             let object = pop(&mut frame.stack)?;
             let old = get_value_property(realm, &object, &key)?;
-            let number = super::to_numeric(realm, old)?;
+            let number = numeric_value(realm, old)?;
             let new = JsValue::number(number + delta);
             set_value_property(realm, &object, &key, new.clone(), true)?;
             frame
@@ -744,6 +1398,8 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
                 let size = size as usize;
                 frame.locals.resize(offset + size, JsValue::Undefined);
                 frame.local_frames.push((offset, size));
+                frame.local_offset = offset;
+                frame.local_size = size;
             }
         },
         Op::PopEnv => {
@@ -756,6 +1412,16 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             } else if frame.local_frames.len() > 1 {
                 let (offset, _) = frame.local_frames.pop().unwrap();
                 frame.locals.truncate(offset);
+                match frame.local_frames.last() {
+                    Some((offset, size)) => {
+                        frame.local_offset = *offset;
+                        frame.local_size = *size;
+                    }
+                    None => {
+                        frame.local_offset = 0;
+                        frame.local_size = 0;
+                    }
+                }
             } else {
                 return Err(realm.type_error("Environment underflow"));
             }
@@ -772,7 +1438,7 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         }
         Op::TryStart(catch_pc) => {
             frame.handlers.push(Handler {
-                catch_pc,
+                catch_pc: catch_pc as usize,
                 stack_len: frame.stack.len(),
                 env: frame.env.clone(),
                 local_frames: frame.local_frames.len(),
@@ -866,7 +1532,7 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
                 Some(value) => frame.stack.push(value),
                 None => {
                     frame.stack.pop();
-                    frame.pc = exit;
+                    *pc = exit as usize;
                 }
             }
         }
@@ -930,7 +1596,7 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
     Ok(Step::Continue)
 }
 
-/// Fast i32+i32 with overflow promotion, shared by the fused add opcodes.
+/// Fast i32+i32; overflow falls back to the Number path in `add_values`.
 #[inline]
 fn add_ints(left: &JsValue, right: &JsValue) -> Option<JsValue> {
     if let (JsValue::Int(left), JsValue::Int(right)) = (left, right) {
@@ -938,11 +1604,55 @@ fn add_ints(left: &JsValue, right: &JsValue) -> Option<JsValue> {
         if (i32::MIN as i64..=i32::MAX as i64).contains(&sum) {
             Some(JsValue::Int(sum as i32))
         } else {
-            Some(JsValue::Float(sum as f64))
+            None
         }
     } else {
         None
     }
+}
+
+/// Rare numeric fallbacks live out of line so the inlined dispatch loop does
+/// not need to preserve floating-point registers on every JS call.
+#[inline(never)]
+fn int_step_overflow(value: i32, delta: i32) -> JsValue {
+    JsValue::number(value as f64 + delta as f64)
+}
+
+#[inline(never)]
+fn int_sub_overflow(left: i32, right: i32) -> JsValue {
+    JsValue::number(left as f64 - right as f64)
+}
+
+#[inline(never)]
+fn float_step(value: f64, delta: f64) -> JsValue {
+    JsValue::number(value + delta)
+}
+
+#[inline(never)]
+fn float_value(value: f64) -> JsValue {
+    JsValue::number(value)
+}
+
+#[inline(never)]
+fn numeric_value(realm: &mut Realm, value: JsValue) -> JsResult<f64> {
+    super::to_numeric(realm, value)
+}
+
+#[inline(never)]
+fn int32_value(realm: &mut Realm, value: JsValue) -> JsResult<i32> {
+    Ok(super::to_int32(super::to_numeric(realm, value)?))
+}
+
+#[inline(never)]
+fn numeric_step(realm: &mut Realm, value: JsValue, delta: f64) -> JsResult<JsValue> {
+    Ok(JsValue::number(super::to_numeric(realm, value)? + delta))
+}
+
+#[inline(never)]
+fn sub_slow(realm: &mut Realm, left: JsValue, right: JsValue) -> JsResult<JsValue> {
+    Ok(JsValue::number(
+        super::to_numeric(realm, left)? - super::to_numeric(realm, right)?,
+    ))
 }
 
 fn binary_number(
@@ -952,6 +1662,11 @@ fn binary_number(
 ) -> JsResult<()> {
     let right = pop(&mut frame.stack)?;
     let left = pop(&mut frame.stack)?;
+    if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+        let value = operation(*left as f64, *right as f64);
+        frame.stack.push(JsValue::number(value));
+        return Ok(());
+    }
     let value = operation(
         super::to_numeric(realm, left)?,
         super::to_numeric(realm, right)?,
@@ -967,6 +1682,10 @@ fn binary_int(
 ) -> JsResult<()> {
     let right = pop(&mut frame.stack)?;
     let left = pop(&mut frame.stack)?;
+    if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+        frame.stack.push(JsValue::Int(operation(*left, *right)));
+        return Ok(());
+    }
     let value = operation(
         super::to_int32(super::to_numeric(realm, left)?),
         super::to_int32(super::to_numeric(realm, right)?),
@@ -975,18 +1694,27 @@ fn binary_int(
     Ok(())
 }
 
-#[inline]
+#[inline(always)]
+fn compare_ints(left: i32, right: i32, op: CompareOp) -> bool {
+    match op {
+        CompareOp::Lt => left < right,
+        CompareOp::Le => left <= right,
+        CompareOp::Gt => left > right,
+        CompareOp::Ge => left >= right,
+    }
+}
+
+#[inline(never)]
 fn compare_values(
     realm: &mut Realm,
     left: &JsValue,
     right: &JsValue,
     op: CompareOp,
 ) -> JsResult<bool> {
-    let ordering = if let (JsValue::Int(left), JsValue::Int(right)) = (left, right) {
-        Some(left.cmp(right) as i32)
-    } else {
-        crate::coerce::abstract_compare(realm, left, right)?
-    };
+    if let (JsValue::Int(left), JsValue::Int(right)) = (left, right) {
+        return Ok(compare_ints(*left, *right, op));
+    }
+    let ordering = crate::coerce::abstract_compare(realm, left, right)?;
     Ok(ordering.is_some_and(|ordering| match op {
         CompareOp::Lt => ordering < 0,
         CompareOp::Le => ordering <= 0,
@@ -1051,7 +1779,8 @@ fn pop_array(stack: &mut ValueStack) -> JsResult<Vec<JsValue>> {
 fn property_key_from_constant(definition: &FunctionDef, index: u32) -> JsResult<PropKey> {
     match definition.constants.get(index as usize) {
         Some(Constant::String(value)) => Ok(crate::object::key_from_string(value.clone())),
-        Some(Constant::Number(value)) => Ok(PropKey::Str(Rc::from(super::format_number(*value)))),
+        Some(Constant::Int(value)) => Ok(PropKey::from(value.to_string())),
+        Some(Constant::Number(value)) => Ok(PropKey::from(super::format_number(*value))),
         _ => Err(JsValue::string("InternalError: invalid property constant")),
     }
 }
@@ -1063,6 +1792,7 @@ fn constant_value(
     env: Option<&EnvRef>,
 ) -> JsResult<JsValue> {
     match definition.constants.get(index as usize) {
+        Some(Constant::Int(value)) => Ok(JsValue::Int(*value)),
         Some(Constant::Number(value)) => Ok(JsValue::number(*value)),
         Some(Constant::String(value)) => Ok(JsValue::String(value.clone())),
         Some(Constant::Function(function)) => Ok(realm.make_js_function(

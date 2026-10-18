@@ -4,6 +4,19 @@
 
 use super::*;
 
+enum LoopLimit {
+    Var { depth: u16, slot: u16 },
+    Const(f64),
+}
+
+struct ForNextPlan {
+    depth: u16,
+    slot: u16,
+    delta: i8,
+    limit: LoopLimit,
+    op: CompareOp,
+}
+
 impl Compiler {
     /// Static imports are lowered to the host `require()` bridge:
     ///
@@ -37,8 +50,7 @@ impl Compiler {
     }
 
     fn compile_require(&mut self, source: &str) {
-        let require = self.string_constant("require");
-        self.emit(Op::GetGlobal(require));
+        self.emit_get_global("require");
         let source = self.string_constant(source);
         self.emit(Op::PushConst(source));
         self.emit(Op::Call(1));
@@ -112,8 +124,10 @@ impl Compiler {
         match &statement.kind {
             StmtKind::Empty | StmtKind::Debugger => {}
             StmtKind::Expr(expression) => {
-                self.compile_expr(expression)?;
-                self.emit(Op::Pop);
+                if !self.compile_discard_expr(expression)? {
+                    self.compile_expr(expression)?;
+                    self.emit(Op::Pop);
+                }
             }
             StmtKind::Block(statements) => {
                 self.compile_block(statements)?;
@@ -146,8 +160,7 @@ impl Compiler {
                 consequent,
                 alternate,
             } => {
-                self.compile_expr(test)?;
-                let else_jump = self.emit_jump(Op::JumpIfFalse(0));
+                let else_jump = self.emit_test_jump(test, false)?;
                 self.compile_stmt_or_block(consequent)?;
                 if let Some(alternate) = alternate {
                     let end_jump = self.emit_jump(Op::Jump(0));
@@ -293,10 +306,80 @@ impl Compiler {
         Ok(())
     }
 
+    /// Emit a condition branch, fusing `local < local` and `local < constant`
+    /// with the jump when the test is a comparison (QuickJS keeps them as
+    /// separate opcodes, but its interpreter threads them without a stack
+    /// round-trip; the fused form gets the same effect here).
+    pub(super) fn emit_test_jump(
+        &mut self,
+        test: &Expr,
+        jump_if_true: bool,
+    ) -> Result<usize, ParseError> {
+        self.span = test.span;
+        if let ExprKind::Binary {
+            op: BinaryOp::BitAnd,
+            left,
+            right,
+        } = &test.kind
+            && let ExprKind::Ident(name) = &left.kind
+            && let ExprKind::Literal(Literal::Number(value)) = &right.kind
+            && value.fract() == 0.0
+            && *value >= i32::MIN as f64
+            && *value <= i32::MAX as f64
+            && let Some(reference) = self.resolve(name)
+        {
+            return Ok(self.emit_jump(Op::BitAndVarConstJump {
+                depth: reference.depth,
+                slot: reference.slot,
+                value: *value as i32,
+                jump_if_true,
+                target: 0,
+            }));
+        }
+        if let ExprKind::Binary { op, left, right } = &test.kind
+            && let Some(op) = comparison_op(*op)
+            && let ExprKind::Ident(name) = &left.kind
+            && let Some(left_ref) = self.resolve(name)
+        {
+            if let ExprKind::Ident(right_name) = &right.kind
+                && let Some(right_ref) = self.resolve(right_name)
+            {
+                return Ok(self.emit_jump(Op::CompareVarsJump {
+                    op,
+                    left_depth: left_ref.depth,
+                    left_slot: left_ref.slot,
+                    right_depth: right_ref.depth,
+                    right_slot: right_ref.slot,
+                    jump_if_true,
+                    target: 0,
+                }));
+            }
+            if let ExprKind::Literal(Literal::Number(value)) = &right.kind
+                && value.fract() == 0.0
+                && *value >= i32::MIN as f64
+                && *value <= i32::MAX as f64
+            {
+                return Ok(self.emit_jump(Op::CompareVarConstJump {
+                    op,
+                    depth: left_ref.depth,
+                    slot: left_ref.slot,
+                    value: *value as i32,
+                    jump_if_true,
+                    target: 0,
+                }));
+            }
+        }
+        self.compile_expr(test)?;
+        Ok(self.emit_jump(if jump_if_true {
+            Op::JumpIfTrue(0)
+        } else {
+            Op::JumpIfFalse(0)
+        }))
+    }
+
     pub(super) fn compile_while(&mut self, test: &Expr, body: &Stmt) -> Result<(), ParseError> {
         let start = self.position();
-        self.compile_expr(test)?;
-        let end_jump = self.emit_jump(Op::JumpIfFalse(0));
+        let end_jump = self.emit_test_jump(test, false)?;
         let break_context = BreakContext {
             label: None,
             env_depth: self.local_frames.len(),
@@ -317,7 +400,7 @@ impl Compiler {
         self.compile_statement(body)?;
         let loop_context = self.loops.pop().unwrap();
         let break_context = self.breakables.pop().unwrap();
-        self.emit(Op::Jump(start));
+        self.emit(Op::Jump(start as u32));
         let end = self.position();
         self.patch_jump(end_jump, end);
         for jump in break_context.jumps {
@@ -350,8 +433,8 @@ impl Compiler {
         self.loops.push(loop_context);
         self.compile_statement(body)?;
         let continue_target = self.position();
-        self.compile_expr(test)?;
-        self.emit(Op::JumpIfTrue(start));
+        let test_jump = self.emit_test_jump(test, true)?;
+        self.patch_jump(test_jump, start);
         let loop_context = self.loops.pop().unwrap();
         let break_context = self.breakables.pop().unwrap();
         let end = self.position();
@@ -362,6 +445,64 @@ impl Compiler {
             self.patch_jump(jump, continue_target);
         }
         Ok(())
+    }
+
+    /// Recognize `for (…; i < limit; i++)` so the increment and the loop
+    /// test become one opcode. QuickJS keeps `OP_inc_loc` and the comparison
+    /// separate; fusing them removes one dispatch and one local read.
+    fn for_next_plan(&mut self, test: Option<&Expr>, update: Option<&Expr>) -> Option<ForNextPlan> {
+        let test = test?;
+        let update = update?;
+        let ExprKind::Update {
+            op: update_op,
+            argument,
+            ..
+        } = &update.kind
+        else {
+            return None;
+        };
+        let ExprKind::Ident(update_name) = &argument.kind else {
+            return None;
+        };
+        let ExprKind::Binary { op, left, right } = &test.kind else {
+            return None;
+        };
+        let op = comparison_op(*op)?;
+        let ExprKind::Ident(test_name) = &left.kind else {
+            return None;
+        };
+        if test_name != update_name {
+            return None;
+        }
+        let reference = self.resolve(update_name)?;
+        let limit = match &right.kind {
+            ExprKind::Ident(name) => {
+                let reference = self.resolve(name)?;
+                LoopLimit::Var {
+                    depth: reference.depth,
+                    slot: reference.slot,
+                }
+            }
+            ExprKind::Literal(Literal::Number(value))
+                if value.fract() == 0.0
+                    && *value >= i32::MIN as f64
+                    && *value <= i32::MAX as f64 =>
+            {
+                LoopLimit::Const(*value)
+            }
+            _ => return None,
+        };
+        Some(ForNextPlan {
+            depth: reference.depth,
+            slot: reference.slot,
+            delta: if matches!(update_op, UpdateOp::Increment) {
+                1
+            } else {
+                -1
+            },
+            limit,
+            op,
+        })
     }
 
     pub(super) fn compile_for(
@@ -410,8 +551,7 @@ impl Compiler {
                 });
             }
             let end_jump = if let Some(test) = test {
-                self.compile_expr(test)?;
-                Some(self.emit_jump(Op::JumpIfFalse(0)))
+                Some(self.emit_test_jump(test, false)?)
             } else {
                 None
             };
@@ -450,7 +590,7 @@ impl Compiler {
             }
             self.emit(Op::PopEnv);
             self.local_frames.pop();
-            self.emit(Op::Jump(start));
+            self.emit(Op::Jump(start as u32));
             let loop_context = self.loops.pop().unwrap();
             let break_context = self.breakables.pop().unwrap();
             let exit = self.position();
@@ -480,11 +620,12 @@ impl Compiler {
         }
         let start = self.position();
         let end_jump = if let Some(test) = test {
-            self.compile_expr(test)?;
-            Some(self.emit_jump(Op::JumpIfFalse(0)))
+            Some(self.emit_test_jump(test, false)?)
         } else {
             None
         };
+        let body_start = self.position();
+        let next_plan = self.for_next_plan(test.as_ref(), update.as_ref());
         let break_context = BreakContext {
             label: None,
             env_depth: self.local_frames.len(),
@@ -505,7 +646,30 @@ impl Compiler {
         self.compile_statement(body)?;
         let continue_target = self.position();
         let mut jumped = false;
-        if let Some(update) = update
+        if let Some(plan) = next_plan {
+            match plan.limit {
+                LoopLimit::Var { depth, slot } => self.emit(Op::ForNext {
+                    depth: plan.depth,
+                    slot: plan.slot,
+                    delta: plan.delta,
+                    limit_depth: depth,
+                    limit_slot: slot,
+                    op: plan.op,
+                    body: body_start as u32,
+                }),
+                LoopLimit::Const(value) => self.emit(Op::ForNextConst {
+                    depth: plan.depth,
+                    slot: plan.slot,
+                    delta: plan.delta,
+                    value: value as i32,
+                    op: plan.op,
+                    body: body_start as u32,
+                }),
+            }
+            jumped = true;
+        }
+        if !jumped
+            && let Some(update) = update
             && let ExprKind::Update { op, argument, .. } = &update.kind
             && let ExprKind::Ident(name) = &argument.kind
             && let Some(reference) = self.resolve(name)
@@ -518,7 +682,7 @@ impl Compiler {
                 } else {
                     -1
                 },
-                target: start,
+                target: start as u32,
             });
             jumped = true;
         }
@@ -527,7 +691,7 @@ impl Compiler {
                 self.compile_expr(update)?;
                 self.emit(Op::Pop);
             }
-            self.emit(Op::Jump(start));
+            self.emit(Op::Jump(start as u32));
         }
         let loop_context = self.loops.pop().unwrap();
         let break_context = self.breakables.pop().unwrap();
@@ -607,7 +771,7 @@ impl Compiler {
             self.emit(Op::PopEnv);
             self.local_frames.pop();
         }
-        self.emit(Op::Jump(start));
+        self.emit(Op::Jump(start as u32));
         let end = self.position();
         self.patch_jump(end_jump, end);
         for jump in break_context.jumps {
@@ -661,7 +825,7 @@ impl Compiler {
         self.emit_finalizers_until(try_depth)?;
         self.emit_cleanup(env_depth, stack_cleanup, try_depth);
         if let Some(target) = target {
-            self.emit(Op::Jump(target));
+            self.emit(Op::Jump(target as u32));
         } else {
             let jump = self.emit_jump(Op::Jump(0));
             self.loops[position].continue_jumps.push(jump);

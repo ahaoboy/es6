@@ -18,8 +18,7 @@ impl Compiler {
                         slot: reference.slot,
                     });
                 } else {
-                    let name = self.string_constant(name);
-                    self.emit(Op::GetGlobal(name));
+                    self.emit_get_global(name);
                 }
             }
             ExprKind::This => self.emit(Op::This),
@@ -59,7 +58,7 @@ impl Compiler {
                         return Ok(());
                     }
                     if let ExprKind::Literal(Literal::Number(value)) = &right.kind {
-                        let index = self.add_constant(Constant::Number(*value));
+                        let index = self.number_constant(*value);
                         self.emit(Op::AddVarConst {
                             depth: left_ref.depth,
                             slot: left_ref.slot,
@@ -92,7 +91,7 @@ impl Compiler {
                         return Ok(());
                     }
                     if let ExprKind::Literal(Literal::Number(value)) = &right.kind {
-                        let value = self.add_constant(Constant::Number(*value));
+                        let value = self.number_constant(*value);
                         self.emit(Op::CompareVarConst {
                             op: compare,
                             depth: left_ref.depth,
@@ -143,8 +142,7 @@ impl Compiler {
                 consequent,
                 alternate,
             } => {
-                self.compile_expr(test)?;
-                let else_jump = self.emit_jump(Op::JumpIfFalse(0));
+                let else_jump = self.emit_test_jump(test, false)?;
                 self.compile_expr(consequent)?;
                 let end_jump = self.emit_jump(Op::Jump(0));
                 let else_target = self.position();
@@ -327,7 +325,7 @@ impl Compiler {
                     depth: sent_depth,
                     slot: sent_slot,
                 });
-                self.emit(Op::Jump(start));
+                self.emit(Op::Jump(start as u32));
                 let done = self.position();
                 self.patch_jump(done_jump, done);
                 self.emit_get_prop_const("value");
@@ -343,11 +341,13 @@ impl Compiler {
             Literal::Bool(true) => self.emit(Op::True),
             Literal::Bool(false) => self.emit(Op::False),
             Literal::Number(value) => {
-                let index = self.add_constant(Constant::Number(*value));
+                let index = self.number_constant(*value);
                 self.emit(Op::PushConst(index));
             }
             Literal::String(value) => {
-                let index = self.add_constant(Constant::String(Rc::from(value.as_str())));
+                let index = self.add_constant(Constant::String(crate::string::JsString::from(
+                    value.as_str(),
+                )));
                 self.emit(Op::PushConst(index));
             }
             Literal::Regex { source, flags } => {
@@ -395,13 +395,15 @@ impl Compiler {
                 match property {
                     ObjectProperty::KeyValue { key, .. } => {
                         if let Some(name) = static_property_name(key) {
-                            keys.push(Rc::from(name));
+                            keys.push(crate::string::JsString::from(name));
                         } else {
                             static_keys = false;
                             break;
                         }
                     }
-                    ObjectProperty::Shorthand(name) => keys.push(Rc::from(name.as_str())),
+                    ObjectProperty::Shorthand(name) => {
+                        keys.push(crate::string::JsString::from(name.as_str()))
+                    }
                     _ => {
                         static_keys = false;
                         break;
@@ -440,8 +442,7 @@ impl Compiler {
                             slot: reference.slot,
                         });
                     } else {
-                        let name = self.string_constant(name);
-                        self.emit(Op::GetGlobal(name));
+                        self.emit_get_global(name);
                     }
                     self.emit(Op::SetPropKeep);
                 }
@@ -1159,6 +1160,70 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compile an expression whose value is discarded. Returns `true` when a
+    /// dedicated no-result path was emitted, avoiding the
+    /// `value + Dup/Pop` round-trip for statement-level assignments and
+    /// increments.
+    pub(super) fn compile_discard_expr(&mut self, expression: &Expr) -> Result<bool, ParseError> {
+        self.span = expression.span;
+        match &expression.kind {
+            ExprKind::Literal(_) => Ok(true),
+            ExprKind::Ident(name) => Ok(self.resolve(name).is_some()),
+            ExprKind::Assign {
+                op: AssignOp::Assign,
+                target,
+                value,
+            } => {
+                if let ExprKind::Ident(name) = &target.kind {
+                    self.compile_expr(value)?;
+                    self.store_ident(name, BindingMode::Auto);
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            ExprKind::Assign {
+                op: AssignOp::Add,
+                target,
+                value,
+            } => {
+                let ExprKind::Ident(dst) = &target.kind else {
+                    return Ok(false);
+                };
+                if let ExprKind::Ident(src) = &value.kind
+                    && let Some(dst) = self.resolve(dst)
+                    && let Some(src) = self.resolve(src)
+                {
+                    self.emit(Op::AddVarDiscard {
+                        dst_depth: dst.depth,
+                        dst_slot: dst.slot,
+                        src_depth: src.depth,
+                        src_slot: src.slot,
+                    });
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            ExprKind::Update { op, argument, .. } => {
+                let ExprKind::Ident(name) = &argument.kind else {
+                    return Ok(false);
+                };
+                let Some(reference) = self.resolve(name) else {
+                    return Ok(false);
+                };
+                self.emit(Op::UpdateVarDiscard {
+                    depth: reference.depth,
+                    slot: reference.slot,
+                    delta: match op {
+                        UpdateOp::Increment => 1,
+                        UpdateOp::Decrement => -1,
+                    },
+                });
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     pub(super) fn emit_ident_load(&mut self, name: &str) {
         if let Some(reference) = self.resolve(name) {
             self.emit(Op::GetVar {
@@ -1166,8 +1231,7 @@ impl Compiler {
                 slot: reference.slot,
             });
         } else {
-            let name = self.string_constant(name);
-            self.emit(Op::GetGlobal(name));
+            self.emit_get_global(name);
         }
     }
 

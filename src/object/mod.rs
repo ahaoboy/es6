@@ -10,6 +10,7 @@ pub type PropertyMap = IndexMap<PropKey, Property, FxBuildHasher>;
 
 use crate::bytecode::FunctionDef;
 use crate::runtime::Realm;
+use crate::string::JsString;
 use crate::value::{EnvRef, JsResult, JsValue};
 
 pub type ObjRef = Rc<RefCell<ObjectData>>;
@@ -52,26 +53,32 @@ pub fn bump_prototype_generation() {
 
 #[derive(Clone, Debug)]
 pub enum PropKey {
-    Str(Rc<str>),
+    Str(JsString),
     Index(usize),
     Symbol(u32),
 }
 
 impl From<&str> for PropKey {
     fn from(value: &str) -> Self {
-        Self::Str(Rc::from(value))
+        Self::Str(JsString::from(value))
     }
 }
 
 impl From<&String> for PropKey {
     fn from(value: &String) -> Self {
-        Self::Str(Rc::from(value.as_str()))
+        Self::Str(JsString::from(value.as_str()))
     }
 }
 
 impl From<String> for PropKey {
     fn from(value: String) -> Self {
-        Self::Str(Rc::from(value))
+        Self::Str(JsString::from(value))
+    }
+}
+
+impl From<JsString> for PropKey {
+    fn from(value: JsString) -> Self {
+        Self::Str(value)
     }
 }
 
@@ -91,10 +98,10 @@ impl PropKey {
         }
     }
 
-    pub fn to_rc_string(&self) -> Option<Rc<str>> {
+    pub fn to_rc_string(&self) -> Option<JsString> {
         match self {
             Self::Str(value) => Some(value.clone()),
-            Self::Index(index) => Some(Rc::from(index.to_string())),
+            Self::Index(index) => Some(JsString::from(index.to_string())),
             Self::Symbol(_) => None,
         }
     }
@@ -238,7 +245,7 @@ impl ObjectData {
         }
     }
 
-    pub fn boxed_string(value: Rc<str>, prototype: Option<ObjRef>) -> Self {
+    pub fn boxed_string(value: JsString, prototype: Option<ObjRef>) -> Self {
         Self {
             props: PropertyMap::default(),
             prototype,

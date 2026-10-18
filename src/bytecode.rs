@@ -1,14 +1,22 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::string::JsString;
+
 #[derive(Clone)]
 pub enum Constant {
+    /// Integral literal that fits `i32`; pushed as `JsValue::Int` without
+    /// running the float classification in the hot path.
+    Int(i32),
     Number(f64),
-    String(Rc<str>),
+    String(JsString),
     Function(Rc<FunctionDef>),
     Class(Rc<ClassDef>),
-    Strings(Rc<[Rc<str>]>),
-    Regex { source: Rc<str>, flags: Rc<str> },
+    Strings(Rc<[JsString]>),
+    Regex {
+        source: Rc<str>,
+        flags: Rc<str>,
+    },
 }
 
 pub struct ClassDef {
@@ -51,6 +59,10 @@ pub struct FunctionDef {
     pub is_async: bool,
     pub is_generator: bool,
     pub strict: bool,
+    /// Synthetic `<class_fields>` initializer, which copies `this` slots into
+    /// the frame at entry. Precomputed so the call path does not compare
+    /// function names.
+    pub is_class_fields: bool,
     pub source: String,
 }
 
@@ -71,6 +83,7 @@ impl FunctionDef {
                 is_async: false,
                 is_generator: false,
                 strict: false,
+                is_class_fields: false,
                 source: String::new(),
             });
         }
@@ -118,7 +131,10 @@ pub enum Op {
         depth: u16,
         slot: u16,
     },
-    GetGlobal(u32),
+    GetGlobal {
+        name: u32,
+        cache: u32,
+    },
     SetGlobal(u32),
     DeleteGlobal(u32),
 
@@ -193,14 +209,14 @@ pub enum Op {
     Throw,
     /// Generator suspension with an absolute resume label
     /// (`OP_yield`, quickjs.c:20871).
-    Yield(usize),
-    Jump(usize),
-    JumpIfFalse(usize),
-    JumpIfTrue(usize),
-    JumpIfNotUndefined(usize),
-    JumpIfNullish(usize),
+    Yield(u32),
+    Jump(u32),
+    JumpIfFalse(u32),
+    JumpIfTrue(u32),
+    JumpIfNotUndefined(u32),
+    JumpIfNullish(u32),
     /// Peeks the duplicate on top: jumps when nullish, otherwise pops it.
-    JumpIfNullishKeep(usize),
+    JumpIfNullishKeep(u32),
 
     Add,
     Sub,
@@ -234,6 +250,20 @@ pub enum Op {
     Void,
     Await,
 
+    /// `dst += src` as an expression statement: like `AddVar` without the
+    /// result push (`OP_add_loc` + `OP_drop` in QuickJS).
+    AddVarDiscard {
+        dst_depth: u16,
+        dst_slot: u16,
+        src_depth: u16,
+        src_slot: u16,
+    },
+    /// `local++`/`local--` with the result discarded.
+    UpdateVarDiscard {
+        depth: u16,
+        slot: u16,
+        delta: i8,
+    },
     /// `dst += src` for two resolved variables, fused from
     /// `GetVar/GetVar/Add/Dup/SetVar`.
     AddVar {
@@ -264,12 +294,61 @@ pub enum Op {
         right_depth: u16,
         right_slot: u16,
     },
+    /// Fused compare + conditional branch: the boolean never reaches the
+    /// value stack. Conditions dominate loop bytecode, so this removes one
+    /// opcode and one stack round-trip per iteration.
+    CompareVarsJump {
+        op: CompareOp,
+        left_depth: u16,
+        left_slot: u16,
+        right_depth: u16,
+        right_slot: u16,
+        jump_if_true: bool,
+        target: u32,
+    },
+    CompareVarConstJump {
+        op: CompareOp,
+        depth: u16,
+        slot: u16,
+        value: i32,
+        jump_if_true: bool,
+        target: u32,
+    },
+    /// `if (local & constant)` fused with its branch, used by flag tests in
+    /// hot loops.
+    BitAndVarConstJump {
+        depth: u16,
+        slot: u16,
+        value: i32,
+        jump_if_true: bool,
+        target: u32,
+    },
     /// Increment/decrement a local and jump, with the result discarded.
     UpdateVarJump {
         depth: u16,
         slot: u16,
         delta: i8,
-        target: usize,
+        target: u32,
+    },
+    /// `for` loop tail: increment `slot`, compare it with a limit and either
+    /// jump back to the loop body or fall through to the exit. Collapses the
+    /// `UpdateVarJump` + `CompareVarsJump` pair QuickJS keeps separate.
+    ForNext {
+        depth: u16,
+        slot: u16,
+        delta: i8,
+        limit_depth: u16,
+        limit_slot: u16,
+        op: CompareOp,
+        body: u32,
+    },
+    ForNextConst {
+        depth: u16,
+        slot: u16,
+        delta: i8,
+        value: i32,
+        op: CompareOp,
+        body: u32,
     },
     /// `local + constant`, pushing the result.
     AddVarConst {
@@ -301,11 +380,11 @@ pub enum Op {
     /// stack into the exports object below it, skipping `default`
     /// (`ExportEntriesForModule`, ES2022 16.2.3.5).
     ExportAll,
-    TryStart(usize),
+    TryStart(u32),
     TryEnd,
     IterInit,
     ForInInit,
-    IterNext(usize),
+    IterNext(u32),
     IterClose,
     CreateClass(u32),
     SuperCall(u16),

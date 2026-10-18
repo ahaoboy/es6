@@ -120,6 +120,7 @@ pub fn execute(
     }
 }
 
+#[inline(never)]
 pub(crate) fn run_frame(
     realm: &mut Realm,
     definition: Rc<FunctionDef>,
@@ -159,18 +160,45 @@ fn run_loop(
     realm: &mut Realm,
     mut frame: Box<Frame>,
 ) -> (JsResult<RunOutcome>, Option<Box<Frame>>) {
+    // Keep the bytecode slice in a local: it is stable for the whole call and
+    // avoids reloading `frame.definition` + the `Vec` pointer per opcode.
+    let definition = frame.definition.clone();
+    let code = definition.code.as_slice();
+    // Program counter kept in a register; synchronized with `frame.pc` when
+    // an opcode suspends, unwinds or returns.
+    let mut pc = frame.pc;
+    // Check the allocation threshold from the dispatch loop, like QuickJS
+    // calling `js_trigger_gc` from its allocation helpers. The registry keeps
+    // every entity alive, so without this a long-running script would only
+    // collect once when `eval` returns.
+    let mut gc_countdown = 4096u32;
     loop {
-        if frame.pc >= frame.definition.code.len() {
+        gc_countdown -= 1;
+        if gc_countdown == 0 {
+            gc_countdown = 4096;
+            crate::gc::maybe_collect();
+        }
+        if pc >= code.len() {
+            frame.pc = pc;
             return (Ok(RunOutcome::Return(JsValue::Undefined)), Some(frame));
         }
-        let op = frame.definition.code[frame.pc];
-        frame.pc += 1;
-        match ops::execute_op(realm, &mut frame, op) {
+        let op = code[pc];
+        pc += 1;
+        let step = match ops::execute_hot(realm, &mut frame, &mut pc, op) {
+            Ok(Some(step)) => Ok(step),
+            Ok(None) => ops::execute_op(realm, &mut frame, &mut pc, op),
+            Err(error) => Err(error),
+        };
+        match step {
             Ok(Step::Continue) => {}
-            Ok(Step::Return(value)) => {
+            Ok(Step::Return) => {
+                frame.pc = pc;
+                let value = frame.stack.pop().unwrap_or(JsValue::Undefined);
                 return (Ok(RunOutcome::Return(value)), Some(frame));
             }
-            Ok(Step::Await(value)) => {
+            Ok(Step::Await) => {
+                frame.pc = pc;
+                let value = frame.stack.pop().unwrap_or(JsValue::Undefined);
                 let Some(completion) = frame.completion.clone() else {
                     match await_sync(realm, value) {
                         Ok(value) => {
@@ -188,18 +216,20 @@ fn run_loop(
                 }
                 return (Ok(RunOutcome::Suspended), None);
             }
-            Ok(Step::Yield { value, resume_pc }) => {
+            Ok(Step::Yield) => {
                 // Generator suspension: the whole frame moves into the
                 // generator object with its resume point, like QuickJS
                 // stashing `cur_sp`/`cur_pc` in the generator (quickjs.c:20871).
-                frame.pc = resume_pc;
+                frame.pc = pc;
+                let value = frame.stack.pop().unwrap_or(JsValue::Undefined);
                 let value = RunOutcome::Yield { frame, value };
                 return (Ok(value), None);
             }
             Err(exception) => {
+                frame.pc = pc;
                 error::record_error_stack(&exception);
                 if !unwind(&mut frame, exception.clone()) {
-                    if let Some(offset) = frame.definition.positions.get(frame.pc - 1) {
+                    if let Some(offset) = frame.definition.positions.get(pc - 1) {
                         ERROR_OFFSET.with(|current| {
                             if current.get().is_none() {
                                 current.set(Some(*offset as usize));
@@ -208,6 +238,7 @@ fn run_loop(
                     }
                     return (Err(exception), Some(frame));
                 }
+                pc = frame.pc;
             }
         }
     }
@@ -420,16 +451,19 @@ pub(crate) fn run_job(realm: &mut Realm, job: Job) -> JsResult<()> {
 
 /// Constant pool access shared by the opcode handlers. QuickJS indexes the
 /// same data through `JSFunctionBytecode.cpool` (quickjs.c:855).
-pub(crate) fn constant_string(definition: &FunctionDef, index: u32) -> Rc<str> {
+pub(crate) fn constant_string(definition: &FunctionDef, index: u32) -> crate::string::JsString {
     match definition.constants.get(index as usize) {
         Some(Constant::String(value)) => value.clone(),
-        _ => Rc::from(""),
+        _ => crate::string::JsString::from(""),
     }
 }
 
 /// Constant pool access shared by the opcode handlers. QuickJS indexes the
 /// same data through `JSFunctionBytecode.cpool` (quickjs.c:855).
-pub(crate) fn constant_strings(definition: &FunctionDef, index: u32) -> Rc<[Rc<str>]> {
+pub(crate) fn constant_strings(
+    definition: &FunctionDef,
+    index: u32,
+) -> Rc<[crate::string::JsString]> {
     match definition.constants.get(index as usize) {
         Some(Constant::Strings(value)) => value.clone(),
         _ => Rc::from([]),

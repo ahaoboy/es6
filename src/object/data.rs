@@ -233,7 +233,7 @@ pub enum ObjectKind {
     Ordinary,
     Array(ArrayData),
     Function(Rc<JsFunction>),
-    BoxedString(Rc<str>),
+    BoxedString(crate::string::JsString),
     BoxedNumber(f64),
     BoxedBool(bool),
     Date(f64),
@@ -252,7 +252,7 @@ pub enum ObjectKind {
     },
     /// Lazy string iterator over UTF-16 code units (ES2022 23.1.5.2.1).
     StringIterator {
-        text: Rc<str>,
+        text: crate::string::JsString,
         index: usize,
     },
     Map(Vec<(JsValue, JsValue)>),

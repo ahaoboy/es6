@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use crate::bytecode::FunctionDef;
 use crate::object::{Function, ObjRef, Object, ObjectData};
+use crate::string::JsString;
 
 /// The internal completion type. A JavaScript exception is represented by the
 /// thrown value itself, which keeps unwinding allocation-free and makes the VM
@@ -16,7 +17,10 @@ pub type EnvRef = Rc<Env>;
 /// `JSVarRef`/`JSFunctionBytecode.closure_var` and resolves `(depth, slot)`
 /// references while walking `JSStackFrame.var_refs` (quickjs.c:427).
 pub struct Env {
-    pub slots: RefCell<Vec<JsValue>>,
+    /// Captured slots stay inline for the common small closure, avoiding a
+    /// heap buffer per call (`JSVarRef` chains in QuickJS are similarly
+    /// compact).
+    pub slots: RefCell<smallvec::SmallVec<[JsValue; 4]>>,
     pub parent: Option<EnvRef>,
 }
 
@@ -24,8 +28,10 @@ impl Env {
     pub fn new(size: usize, parent: Option<EnvRef>) -> EnvRef {
         // Environments register with the GC like QuickJS'
         // `JS_GC_OBJ_TYPE_VAR_REF` (quickjs.c:450).
+        let mut slots = smallvec::SmallVec::new();
+        slots.resize(size, JsValue::Undefined);
         crate::gc::register_env(Rc::new(Self {
-            slots: RefCell::new(vec![JsValue::Undefined; size]),
+            slots: RefCell::new(slots),
             parent,
         }))
     }
@@ -69,7 +75,7 @@ pub enum JsValue {
     Bool(bool),
     Int(i32),
     Float(f64),
-    String(Rc<str>),
+    String(JsString),
     Symbol(u32),
     Object(ObjRef),
 }
@@ -134,7 +140,7 @@ impl JsValue {
         }
     }
 
-    pub fn as_string(&self) -> Option<Rc<str>> {
+    pub fn as_string(&self) -> Option<JsString> {
         match self {
             Self::String(v) => Some(v.clone()),
             _ => None,
@@ -194,8 +200,8 @@ impl JsValue {
         }
     }
 
-    pub fn string(value: impl Into<String>) -> Self {
-        Self::String(Rc::from(value.into()))
+    pub fn string(value: impl Into<JsString>) -> Self {
+        Self::String(value.into())
     }
 
     pub fn from_function(function: Rc<crate::object::JsFunction>) -> Self {

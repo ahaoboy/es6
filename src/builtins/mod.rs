@@ -232,7 +232,7 @@ pub(crate) fn array_items(realm: &mut Realm, object: &Object) -> JsResult<Vec<Js
         items.push(crate::vm::get_value_property(
             realm,
             &JsValue::Object(object.to_ref()),
-            &PropKey::Str(Rc::from(index.to_string())),
+            &PropKey::from(index.to_string()),
         )?);
     }
     Ok(items)
@@ -252,7 +252,7 @@ pub(crate) fn set_array_items(realm: &mut Realm, object: &Object, items: Vec<JsV
         let _ = crate::vm::set_value_property(
             realm,
             &JsValue::Object(object.to_ref()),
-            &PropKey::Str(Rc::from(index.to_string())),
+            &PropKey::from(index.to_string()),
             item,
             true,
         );

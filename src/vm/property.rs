@@ -9,7 +9,7 @@ use std::rc::Rc;
 use super::ValueStack;
 use super::call::call_value;
 use super::ops::pop;
-use crate::object::{Object, ObjectData, PropCache, PropKey, Property};
+use crate::object::{ObjectData, PropCache, PropKey, Property, ResolvedProperty};
 use crate::runtime::Realm;
 use crate::value::{JsResult, JsValue};
 
@@ -372,13 +372,60 @@ pub(crate) fn display_key(key: &PropKey) -> String {
 
 /// Global lookup through the realm global object, like the
 /// `OP_get_var` global fallback in `JS_CallInternal` (quickjs.c:18051).
-pub(crate) fn global_get(realm: &Realm, name: &str) -> Option<JsValue> {
-    let global = Object::from_ref(realm.global.clone());
-    let key = PropKey::from(name);
-    if global.to_ref().borrow().has_property(&key) {
-        Some(global.get_key(&key))
-    } else {
-        None
+/// Monomorphic global read cache, the counterpart of QuickJS' global
+/// `JSPropCacheEntry` (`OP_get_var` resolves through the global object).
+///
+/// `None` still means "not defined", so callers can raise `ReferenceError`;
+/// undefined values are cached like any other data property.
+pub(crate) fn cached_global_get(
+    realm: &mut Realm,
+    name: &crate::string::JsString,
+    cache: &std::cell::RefCell<PropCache>,
+) -> JsResult<Option<JsValue>> {
+    let key = PropKey::Str(name.clone());
+    {
+        let global = realm.global.borrow();
+        let entry = cache.borrow();
+        if entry.valid
+            && entry.object_shape == global.shape
+            && let Some((cached_key, property)) = global.props.get_index(entry.index as usize)
+            && cached_key == &key
+            && !property.is_accessor()
+        {
+            return Ok(Some(property.value.clone()));
+        }
+    }
+    let value = global_get(realm, name)?;
+    if value.is_some() {
+        let global = realm.global.borrow();
+        if let Some(index) = global.props.get_index_of(&key) {
+            let mut entry = cache.borrow_mut();
+            entry.object_shape = global.shape;
+            entry.index = index as u32;
+            entry.valid = true;
+        }
+    }
+    Ok(value)
+}
+
+/// Global variable read (`OP_get_var` against the global object in
+/// QuickJS). The name is the bytecode constant's `JsString`, so a hot global
+/// read does not allocate or re-hash the text; only an own/prototype lookup
+/// remains. Missing names return `None` so the caller can raise
+/// `ReferenceError` (or return `undefined` for `typeof`).
+pub(crate) fn global_get(
+    realm: &mut Realm,
+    name: &crate::string::JsString,
+) -> JsResult<Option<JsValue>> {
+    let key = PropKey::Str(name.clone());
+    let resolved = { realm.global.borrow().resolve_property(&key) };
+    match resolved {
+        ResolvedProperty::Data { value, .. } => Ok(Some(value)),
+        ResolvedProperty::Accessor { .. } => {
+            let global = JsValue::Object(realm.global.clone());
+            get_value_property(realm, &global, &key).map(Some)
+        }
+        ResolvedProperty::Missing => Ok(None),
     }
 }
 

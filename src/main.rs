@@ -36,6 +36,24 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    // The interpreter uses the native stack for JS calls, like QuickJS'
+    // explicit stack limit; give deeply recursive programs the same headroom
+    // a standalone qjs build has.
+    const STACK_SIZE: usize = 64 * 1024 * 1024;
+    match std::thread::Builder::new()
+        .name("es6".into())
+        .stack_size(STACK_SIZE)
+        .spawn(run_main)
+    {
+        Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+        Err(error) => {
+            eprintln!("failed to start interpreter thread: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(report) => {

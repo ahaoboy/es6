@@ -245,7 +245,7 @@ fn entries(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResul
     for key in keys {
         let value = crate::vm::get_value_property(realm, &source, &key)?;
         let entry = realm.array(vec![
-            JsValue::String(key.to_rc_string().unwrap_or_else(|| Rc::from(""))),
+            JsValue::String(key.to_rc_string().unwrap_or_default()),
             value,
         ]);
         result.push(JsValue::Object(entry));
@@ -511,7 +511,7 @@ fn get_own_property_descriptors(
             &JsValue::Undefined,
             &[
                 JsValue::Object(object.to_ref()),
-                JsValue::String(key.to_rc_string().unwrap_or_else(|| Rc::from(""))),
+                JsValue::String(key.to_rc_string().unwrap_or_default()),
             ],
         )? {
             result

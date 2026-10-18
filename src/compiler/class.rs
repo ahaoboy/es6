@@ -68,6 +68,7 @@ impl Compiler {
                 is_async: false,
                 is_generator: false,
                 strict: true,
+                is_class_fields: false,
                 source: self.source_name.clone(),
             }));
         }

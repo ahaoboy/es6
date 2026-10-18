@@ -12,6 +12,11 @@ use crate::value::{Env, EnvRef, JsResult, JsValue};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Native-stack guard for recursive JS calls, like QuickJS'
+/// `JS_DEFAULT_STACK_SIZE` bound. Hosts that run the engine on a small thread
+/// stack can lower it; the CLI raises the stack and keeps this generous.
+pub const DEFAULT_MAX_CALL_DEPTH: usize = 8000;
+
 #[derive(Clone)]
 pub struct Error {
     message: String,
@@ -149,7 +154,7 @@ pub struct Realm {
     pub weak_set_proto: ObjRef,
     pub typed_array_protos: std::collections::HashMap<crate::object::TypedArrayKind, ObjRef>,
     pub symbol_counter: u32,
-    pub symbols: Vec<Rc<str>>,
+    pub symbols: Vec<crate::string::JsString>,
     pub symbol_registry: std::collections::HashMap<String, u32>,
     pub well_known_symbols: std::collections::HashMap<&'static str, u32>,
     /// FIFO of promise/await jobs. QuickJS keeps the same list in
@@ -168,6 +173,10 @@ pub struct Realm {
     pub(crate) cleared_timer_ids: std::collections::HashSet<u64>,
     /// Lazily created host modules returned by `require()`.
     pub(crate) module_cache: std::collections::HashMap<String, JsValue>,
+    /// Number of bytecode calls currently on the native stack. QuickJS keeps
+    /// the equivalent bound in `rt->stack_limit`.
+    pub(crate) call_depth: usize,
+    pub(crate) max_call_depth: usize,
 }
 
 impl Realm {
@@ -256,6 +265,8 @@ impl Realm {
             #[cfg(feature = "timers")]
             cleared_timer_ids: std::collections::HashSet::new(),
             module_cache: std::collections::HashMap::new(),
+            call_depth: 0,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
         };
         builtins::install(&mut realm);
         realm
@@ -269,7 +280,7 @@ impl Realm {
         allocate(ObjectData::array(Some(self.array_proto.clone()), items))
     }
 
-    pub fn boxed_string(&self, value: Rc<str>) -> ObjRef {
+    pub fn boxed_string(&self, value: crate::string::JsString) -> ObjRef {
         allocate(ObjectData::boxed_string(
             value,
             Some(self.string_proto.clone()),
@@ -389,7 +400,7 @@ impl Realm {
     }
 
     /// Lazy string iterator over UTF-16 code units (ES2022 23.1.5.2.1).
-    pub fn string_iterator(&self, text: Rc<str>) -> ObjRef {
+    pub fn string_iterator(&self, text: crate::string::JsString) -> ObjRef {
         let mut data = ObjectData::ordinary(Some(self.object_proto.clone()));
         data.kind = ObjectKind::StringIterator { text, index: 0 };
         data.class_name = "String Iterator";
@@ -614,7 +625,8 @@ impl Realm {
     pub fn next_symbol(&mut self, description: &str) -> u32 {
         let value = self.symbol_counter;
         self.symbol_counter += 1;
-        self.symbols.push(Rc::from(description));
+        self.symbols
+            .push(crate::string::JsString::from(description));
         value
     }
 
@@ -623,11 +635,11 @@ impl Realm {
         JsValue::Symbol(id)
     }
 
-    pub fn symbol_description(&self, id: u32) -> Rc<str> {
+    pub fn symbol_description(&self, id: u32) -> crate::string::JsString {
         self.symbols
             .get(id as usize)
             .cloned()
-            .unwrap_or_else(|| Rc::from(""))
+            .unwrap_or_else(|| crate::string::JsString::from(""))
     }
 
     pub fn well_known_symbol(&mut self, name: &'static str) -> u32 {
@@ -969,6 +981,15 @@ impl Context {
     /// Run a full cycle collection, like `JS_RunGC` (quickjs.c:7483).
     pub fn run_gc(&self) {
         crate::gc::run_gc_now();
+    }
+
+    /// Largest JS call depth before `RangeError` (QuickJS `rt->stack_limit`).
+    pub fn max_call_depth(&self) -> usize {
+        self.realm.borrow().max_call_depth
+    }
+
+    pub fn set_max_call_depth(&self, depth: usize) {
+        self.realm.borrow_mut().max_call_depth = depth.max(32);
     }
 
     pub fn execute_pending_job(&self) -> Result<bool> {

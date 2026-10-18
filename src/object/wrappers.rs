@@ -269,7 +269,7 @@ pub fn would_create_cycle(object: &ObjRef, prototype: &ObjRef) -> bool {
     false
 }
 
-pub fn key_from_string(value: Rc<str>) -> PropKey {
+pub fn key_from_string(value: crate::string::JsString) -> PropKey {
     key_to_index(&value)
         .map(PropKey::Index)
         .unwrap_or(PropKey::Str(value))

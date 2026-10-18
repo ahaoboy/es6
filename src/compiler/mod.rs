@@ -186,6 +186,7 @@ impl Compiler {
             is_async,
             is_generator,
             strict,
+            is_class_fields: name == "<class_fields>",
             source: self.source_name,
         }
     }
@@ -225,7 +226,10 @@ impl Compiler {
             | Op::JumpIfNullishKeep(value)
             | Op::TryStart(value)
             | Op::IterNext(value)
-            | Op::Yield(value) => *value = target,
+            | Op::Yield(value)
+            | Op::CompareVarsJump { target: value, .. }
+            | Op::CompareVarConstJump { target: value, .. }
+            | Op::BitAndVarConstJump { target: value, .. } => *value = target as u32,
             _ => {}
         }
     }
@@ -242,7 +246,17 @@ impl Compiler {
     }
 
     fn string_constant(&mut self, value: &str) -> u32 {
-        self.add_constant(Constant::String(Rc::from(value)))
+        self.add_constant(Constant::String(crate::string::JsString::from(value)))
+    }
+
+    fn number_constant(&mut self, value: f64) -> u32 {
+        let constant =
+            if value.fract() == 0.0 && value >= i32::MIN as f64 && value <= i32::MAX as f64 {
+                Constant::Int(value as i32)
+            } else {
+                Constant::Number(value)
+            };
+        self.add_constant(constant)
     }
 
     fn add_prop_cache(&mut self) -> u32 {
@@ -255,6 +269,12 @@ impl Compiler {
         let key = self.string_constant(name);
         let cache = self.add_prop_cache();
         self.emit(Op::GetPropConst { key, cache });
+    }
+
+    fn emit_get_global(&mut self, name: &str) {
+        let name = self.string_constant(name);
+        let cache = self.add_prop_cache();
+        self.emit(Op::GetGlobal { name, cache });
     }
 
     fn emit_set_prop_const(&mut self, name: &str, keep: bool) {

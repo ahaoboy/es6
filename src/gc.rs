@@ -21,9 +21,9 @@
 //! keeping one strong reference alive so sweeping is explicit.
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::bytecode::{ClassDef, Constant, FunctionDef};
 use crate::object::{
@@ -34,33 +34,42 @@ use crate::value::{Env, JsValue};
 
 /// Initial GC threshold, in entities: comparable to QuickJS' 256 KiB
 /// `JS_GC_THRESHOLD` (quickjs.c:2333).
-const INITIAL_THRESHOLD: usize = 512;
+const INITIAL_THRESHOLD: usize = 4096;
 
 /// One GC-managed allocation.
+///
+/// The registry keeps only a weak reference, like QuickJS' intrusive
+/// `gc_obj_list` which does not own its entries: acyclic garbage is freed by
+/// its last `Rc` immediately, and only cycles survive to the trial-deletion
+/// scan.
 #[derive(Clone)]
 pub(crate) enum Entity {
-    Object(ObjRef),
-    Env(Rc<Env>),
-    Data(NativeData),
-    Def(Rc<FunctionDef>),
+    Object(Weak<RefCell<ObjectData>>),
+    Env(Weak<Env>),
+    Data(Weak<RefCell<Vec<JsValue>>>),
+    Def(Weak<FunctionDef>),
 }
 
 impl Entity {
     fn key(&self) -> EntityKey {
         match self {
-            Entity::Object(object) => EntityKey(0, Rc::as_ptr(object) as usize),
-            Entity::Env(env) => EntityKey(1, Rc::as_ptr(env) as usize),
-            Entity::Data(data) => EntityKey(2, Rc::as_ptr(data) as usize),
-            Entity::Def(def) => EntityKey(3, Rc::as_ptr(def) as usize),
+            Entity::Object(object) => EntityKey(0, Weak::as_ptr(object) as usize),
+            Entity::Env(env) => EntityKey(1, Weak::as_ptr(env) as usize),
+            Entity::Data(data) => EntityKey(2, Weak::as_ptr(data) as usize),
+            Entity::Def(def) => EntityKey(3, Weak::as_ptr(def) as usize),
         }
+    }
+
+    fn is_live(&self) -> bool {
+        self.strong_count() > 0
     }
 
     fn strong_count(&self) -> usize {
         match self {
-            Entity::Object(object) => Rc::strong_count(object),
-            Entity::Env(env) => Rc::strong_count(env),
-            Entity::Data(data) => Rc::strong_count(data),
-            Entity::Def(def) => Rc::strong_count(def),
+            Entity::Object(object) => object.strong_count(),
+            Entity::Env(env) => env.strong_count(),
+            Entity::Data(data) => data.strong_count(),
+            Entity::Def(def) => def.strong_count(),
         }
     }
 
@@ -71,17 +80,25 @@ impl Entity {
     fn clear(&mut self) {
         match self {
             Entity::Object(object) => {
-                let mut data = object.borrow_mut();
-                data.props.clear();
-                data.prototype = None;
-                data.kind = ObjectKind::Ordinary;
+                if let Some(object) = object.upgrade() {
+                    let mut data = object.borrow_mut();
+                    data.props.clear();
+                    data.prototype = None;
+                    data.kind = ObjectKind::Ordinary;
+                }
             }
             Entity::Env(env) => {
-                env.slots.borrow_mut().clear();
+                if let Some(env) = env.upgrade() {
+                    env.slots.borrow_mut().clear();
+                }
             }
-            Entity::Data(data) => data.borrow_mut().clear(),
-            // Function bytecode is a tree: dropping the registry reference
-            // lets the refcount cascade free it with its constants.
+            Entity::Data(data) => {
+                if let Some(data) = data.upgrade() {
+                    data.borrow_mut().clear();
+                }
+            }
+            // Function bytecode is a tree: dropping the last external
+            // reference frees it with its constants.
             Entity::Def(_) => {}
         }
     }
@@ -93,19 +110,18 @@ struct EntityKey(u8, usize);
 
 struct Registry {
     entities: Vec<Entity>,
-    /// Insert-time keys for duplicate suppression.
-    keys: FxHashSet<EntityKey>,
     live: usize,
     threshold: usize,
 }
 
 thread_local! {
-    static REGISTRY: RefCell<Registry> = RefCell::new(Registry {
-        entities: Vec::new(),
-        keys: FxHashSet::default(),
-        live: 0,
-        threshold: INITIAL_THRESHOLD,
-    });
+    static REGISTRY: RefCell<Registry> = const {
+        RefCell::new(Registry {
+            entities: Vec::new(),
+            live: 0,
+            threshold: INITIAL_THRESHOLD,
+        })
+    };
 }
 
 /// Allocate an object and register it, the equivalent of QuickJS
@@ -113,36 +129,55 @@ thread_local! {
 /// `rt->gc_obj_list`.
 pub(crate) fn allocate_object(data: ObjectData) -> ObjRef {
     let object = Rc::new(RefCell::new(data));
-    register(Entity::Object(object.clone()));
+    register(Entity::Object(Rc::downgrade(&object)));
     object
 }
 
 /// Register an environment, like QuickJS' `JS_GC_OBJ_TYPE_VAR_REF` tracking
 /// (quickjs.c:450).
 pub(crate) fn register_env(env: Rc<Env>) -> Rc<Env> {
-    register(Entity::Env(env.clone()));
+    register(Entity::Env(Rc::downgrade(&env)));
     env
 }
 
 /// Register a shared native data cell (quickjs `js_c_function_data`,
 /// quickjs.c:6595) whose contents `mark_children` walks (quickjs.c:7255).
 pub(crate) fn register_data(data: NativeData) -> NativeData {
-    register(Entity::Data(data.clone()));
+    register(Entity::Data(Rc::downgrade(&data)));
     data
 }
 
 /// Register top-level function bytecode, the equivalent of QuickJS'
 /// `JS_GC_OBJ_TYPE_FUNCTION_BYTECODE` (quickjs.c:450).
 pub(crate) fn register_def(def: Rc<FunctionDef>) -> Rc<FunctionDef> {
-    register(Entity::Def(def.clone()));
+    register(Entity::Def(Rc::downgrade(&def)));
     def
 }
 
 fn register(entity: Entity) {
+    // Every entity is registered exactly once, at creation; suppressing
+    // duplicates with a hash set cost one hash lookup per allocation. The
+    // registry is the `rt->gc_obj_list` equivalent, a plain append.
+    REGISTRY.with(|registry| registry.borrow_mut().entities.push(entity));
+}
+
+/// Allocation-boundary collection used by the interpreter loop. Safe because
+/// the trial-deletion scan treats references held by Rust locals (the value
+/// stack, frame slots, temporaries) as external roots.
+pub(crate) fn maybe_collect() {
     REGISTRY.with(|registry| {
         let mut registry = registry.borrow_mut();
-        if registry.keys.insert(entity.key()) {
-            registry.entities.push(entity);
+        if registry.entities.len() < registry.threshold {
+            return;
+        }
+        // Dead weak handles are acyclic garbage that refcounting already
+        // freed; dropping the handles is much cheaper than a cycle scan.
+        registry.entities.retain(Entity::is_live);
+        if registry.entities.len() >= registry.threshold {
+            run_gc(&mut registry);
+        } else {
+            registry.live = registry.entities.len();
+            registry.threshold = (registry.live * 2).max(INITIAL_THRESHOLD);
         }
     });
 }
@@ -163,6 +198,9 @@ pub(crate) fn trigger_gc() {
 /// computed through explicit internal-in-degree counting since `Rc`
 /// reference counts are immutable.
 fn run_gc(registry: &mut Registry) {
+    // Entries whose last strong reference is gone cannot be part of a cycle;
+    // drop their weak handles before scanning.
+    registry.entities.retain(Entity::is_live);
     let count = registry.entities.len();
     let mut index_of: FxHashMap<EntityKey, usize> =
         FxHashMap::with_capacity_and_hasher(count, Default::default());
@@ -193,7 +231,9 @@ fn run_gc(registry: &mut Registry) {
     for (index, entity) in registry.entities.iter().enumerate() {
         let key = entity.key();
         let internal = in_degree.get(&key).copied().unwrap_or(0) as usize;
-        let external = entity.strong_count().saturating_sub(1 + internal);
+        // The registry holds only a weak handle, so every strong count above
+        // the internal in-degree is an external root.
+        let external = entity.strong_count().saturating_sub(internal);
         if external > 0 {
             marked[index] = true;
             queue.push(index);
@@ -220,14 +260,11 @@ fn run_gc(registry: &mut Registry) {
     // cycles, then drop the registry's own references.
     let mut garbage: Vec<Entity> = Vec::new();
     let mut survivors: Vec<Entity> = Vec::with_capacity(count);
-    let mut survivor_keys: FxHashSet<EntityKey> =
-        FxHashSet::with_capacity_and_hasher(count, Default::default());
     for (index, entity) in std::mem::take(&mut registry.entities)
         .into_iter()
         .enumerate()
     {
         if marked[index] {
-            survivor_keys.insert(entity.key());
             survivors.push(entity);
         } else {
             garbage.push(entity);
@@ -237,12 +274,13 @@ fn run_gc(registry: &mut Registry) {
         entity.clear();
     }
     registry.entities = survivors;
-    registry.keys = survivor_keys;
 
     // Prune weak-collection entries whose keys died in this sweep, so their
     // values become unreachable on the next cycle.
     for entity in &registry.entities {
-        if let Entity::Object(object) = entity {
+        if let Entity::Object(object) = entity
+            && let Some(object) = object.upgrade()
+        {
             let mut data = object.borrow_mut();
             match &mut data.kind {
                 ObjectKind::WeakMap(entries) => {
@@ -260,7 +298,10 @@ fn run_gc(registry: &mut Registry) {
     // (quickjs.c:1695); the entity-count equivalent keeps the same growth
     // policy.
     registry.live = registry.entities.len();
-    registry.threshold = (registry.live + registry.live / 2).max(INITIAL_THRESHOLD);
+    // Grow to twice the live heap before the next cycle scan: weak handles
+    // mean acyclic garbage no longer accumulates in the registry, so scans
+    // only need to find cycles.
+    registry.threshold = (registry.live * 2).max(INITIAL_THRESHOLD);
 }
 
 /// `mark_children` (quickjs.c:7255) over the Rust object model. Every field
@@ -269,15 +310,15 @@ fn run_gc(registry: &mut Registry) {
 fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
     fn value(value: &JsValue, visit: &mut dyn FnMut(&Entity)) {
         if let JsValue::Object(object) = value {
-            visit(&Entity::Object(object.clone()));
+            visit(&Entity::Object(Rc::downgrade(object)));
         }
     }
     fn visit_function(function: &JsFunction, visit: &mut dyn FnMut(&Entity)) {
         if let Some(def) = &function.def {
-            visit(&Entity::Def(def.clone()));
+            visit(&Entity::Def(Rc::downgrade(def)));
         }
         if let Some(env) = &function.env {
-            visit(&Entity::Env(env.clone()));
+            visit(&Entity::Env(Rc::downgrade(env)));
         }
         if let Some(bound) = &function.bound {
             value(&bound.target, visit);
@@ -290,10 +331,10 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
             value(this, visit);
         }
         if let Some(init) = &function.instance_init {
-            visit(&Entity::Def(init.clone()));
+            visit(&Entity::Def(Rc::downgrade(init)));
         }
         // The native data cell shared with `native_data` handlers.
-        visit(&Entity::Data(function.data.clone()));
+        visit(&Entity::Data(Rc::downgrade(&function.data)));
     }
     fn visit_reaction(reaction: &PromiseReaction, visit: &mut dyn FnMut(&Entity)) {
         if let Some(on_fulfilled) = &reaction.on_fulfilled {
@@ -303,7 +344,7 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
             value(on_rejected, visit);
         }
         if let Some(promise) = &reaction.promise {
-            visit(&Entity::Object(promise.clone()));
+            visit(&Entity::Object(Rc::downgrade(promise)));
         }
     }
     fn visit_promise(promise: &PromiseData, visit: &mut dyn FnMut(&Entity)) {
@@ -314,22 +355,22 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
     }
     fn visit_class(class: &Rc<ClassDef>, visit: &mut dyn FnMut(&Entity)) {
         if let Some(constructor) = &class.constructor {
-            visit(&Entity::Def(constructor.clone()));
+            visit(&Entity::Def(Rc::downgrade(constructor)));
         }
         for method in &class.methods {
-            visit(&Entity::Def(method.function.clone()));
+            visit(&Entity::Def(Rc::downgrade(&method.function)));
         }
         if let Some(init) = &class.instance_init {
-            visit(&Entity::Def(init.clone()));
+            visit(&Entity::Def(Rc::downgrade(init)));
         }
         if let Some(init) = &class.static_init {
-            visit(&Entity::Def(init.clone()));
+            visit(&Entity::Def(Rc::downgrade(init)));
         }
     }
     fn visit_frame(frame: &crate::vm::Frame, visit: &mut dyn FnMut(&Entity)) {
-        visit(&Entity::Def(frame.definition.clone()));
+        visit(&Entity::Def(Rc::downgrade(&frame.definition)));
         if let Some(env) = &frame.env {
-            visit(&Entity::Env(env.clone()));
+            visit(&Entity::Env(Rc::downgrade(env)));
         }
         value(&frame.this, visit);
         if let Some(callee) = &frame.callee {
@@ -346,15 +387,18 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
         }
         for handler in &frame.handlers {
             if let Some(env) = &handler.env {
-                visit(&Entity::Env(env.clone()));
+                visit(&Entity::Env(Rc::downgrade(env)));
             }
         }
         if let Some(completion) = &frame.completion {
-            visit(&Entity::Object(completion.clone()));
+            visit(&Entity::Object(Rc::downgrade(completion)));
         }
     }
     match entity {
         Entity::Object(object) => {
+            let Some(object) = object.upgrade() else {
+                return;
+            };
             let data = object.borrow();
             for property in data.props.values() {
                 value(&property.value, visit);
@@ -366,7 +410,7 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                 }
             }
             if let Some(prototype) = &data.prototype {
-                visit(&Entity::Object(prototype.clone()));
+                visit(&Entity::Object(Rc::downgrade(prototype)));
             }
             match &data.kind {
                 ObjectKind::Ordinary => {}
@@ -410,10 +454,10 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                 ObjectKind::Promise(inner) => visit_promise(inner, visit),
                 ObjectKind::ArrayBuffer(_) => {}
                 ObjectKind::DataView(view) => {
-                    visit(&Entity::Object(view.buffer.clone()));
+                    visit(&Entity::Object(Rc::downgrade(&view.buffer)));
                 }
                 ObjectKind::TypedArray(typed) => {
-                    visit(&Entity::Object(typed.buffer.clone()));
+                    visit(&Entity::Object(Rc::downgrade(&typed.buffer)));
                 }
                 ObjectKind::AsyncFrame(frame) => {
                     if let Some(frame) = frame {
@@ -421,7 +465,7 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                     }
                 }
                 ObjectKind::ArrayIterator { array, .. } => {
-                    visit(&Entity::Object(array.clone()));
+                    visit(&Entity::Object(Rc::downgrade(array)));
                 }
                 ObjectKind::StringIterator { .. } => {}
                 ObjectKind::Generator(generator) => {
@@ -437,14 +481,20 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
             }
         }
         Entity::Env(env) => {
+            let Some(env) = env.upgrade() else {
+                return;
+            };
             for slot in env.slots.borrow().iter() {
                 value(slot, visit);
             }
             if let Some(parent) = &env.parent {
-                visit(&Entity::Env(parent.clone()));
+                visit(&Entity::Env(Rc::downgrade(parent)));
             }
         }
         Entity::Data(data) => {
+            let Some(data) = data.upgrade() else {
+                return;
+            };
             for item in data.borrow().iter() {
                 value(item, visit);
             }
@@ -452,9 +502,12 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
         // Function bytecode holds only its constant pool: nested defs,
         // classes and plain data (quickjs.c:855 `cpool`).
         Entity::Def(def) => {
+            let Some(def) = def.upgrade() else {
+                return;
+            };
             for constant in &def.constants {
                 match constant {
-                    Constant::Function(nested) => visit(&Entity::Def(nested.clone())),
+                    Constant::Function(nested) => visit(&Entity::Def(Rc::downgrade(nested))),
                     Constant::Class(class_def) => visit_class(class_def, visit),
                     _ => {}
                 }

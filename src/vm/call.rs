@@ -90,6 +90,10 @@ pub(crate) fn call_value_owned(
         this
     };
     let completion = definition.is_async.then(|| realm.promise());
+    if realm.call_depth >= realm.max_call_depth {
+        return Err(realm.range_error("Maximum call stack size exceeded"));
+    }
+    realm.call_depth += 1;
     let result = super::run_frame(
         realm,
         definition.clone(),
@@ -99,6 +103,7 @@ pub(crate) fn call_value_owned(
         arguments,
         completion.clone(),
     );
+    realm.call_depth -= 1;
     if trace {
         super::error::pop_call_stack();
     }
@@ -308,7 +313,7 @@ pub(crate) fn create_class(
             let mut data = target_reference.borrow_mut();
             let property = data
                 .props
-                .entry(PropKey::Str(method.name.clone()))
+                .entry(PropKey::from(method.name.as_ref()))
                 .or_insert_with(|| Property {
                     value: JsValue::Undefined,
                     get: None,
@@ -323,7 +328,7 @@ pub(crate) fn create_class(
                 property.set = Some(Box::new(function));
             }
         } else {
-            target.set_key(PropKey::Str(method.name.clone()), function);
+            target.set_key(PropKey::from(method.name.as_ref()), function);
         }
     }
     Ok(constructor)

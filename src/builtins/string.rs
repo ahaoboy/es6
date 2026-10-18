@@ -71,9 +71,9 @@ pub fn install(realm: &mut Realm) {
 
 fn constructor(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = if arguments.is_empty() {
-        Rc::from("")
+        crate::string::JsString::default()
     } else {
-        Rc::from(crate::vm::to_string(realm, arg(arguments, 0))?)
+        crate::string::JsString::from(crate::vm::to_string(realm, arg(arguments, 0))?)
     };
     if this.is_object() && !this.is_function() {
         let object = realm.boxed_string(value);

@@ -47,19 +47,19 @@ impl Compiler {
                 Ok(())
             }
             Pattern::Object(properties) => {
-                let mut excluded: Vec<Rc<str>> = Vec::new();
+                let mut excluded: Vec<crate::string::JsString> = Vec::new();
                 for property in properties {
                     if let PropertyName::Ident(name) = &property.key
                         && name == "..."
                     {
-                        let excluded: Rc<[Rc<str>]> = Rc::from(excluded.clone());
+                        let excluded: Rc<[crate::string::JsString]> = Rc::from(excluded.clone());
                         let index = self.add_constant(Constant::Strings(excluded));
                         self.emit(Op::ObjectRest(index));
                         self.bind_pattern(&property.value, mode)?;
                         continue;
                     }
                     if let Some(name) = static_property_name(&property.key) {
-                        excluded.push(Rc::from(name));
+                        excluded.push(crate::string::JsString::from(name));
                     }
                     self.emit(Op::Dup);
                     self.compile_key_name(&property.key)?;

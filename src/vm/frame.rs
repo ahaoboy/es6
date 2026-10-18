@@ -7,8 +7,6 @@
 
 use std::rc::Rc;
 
-use smallvec::SmallVec;
-
 use crate::bytecode::FunctionDef;
 use crate::object::ObjRef;
 use crate::value::{EnvRef, JsValue};
@@ -16,16 +14,19 @@ use crate::value::{EnvRef, JsValue};
 use super::{ArgumentStack, ValueStack};
 
 /// Dispatch result for one opcode.
+///
+/// Payloads stay on the value stack (and `frame.pc` carries the resume
+/// point), so the common `Continue` path returns a single-byte enum instead
+/// of a 24-byte tagged value — the interpreter executes this return once per
+/// opcode.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
     Continue,
-    Return(JsValue),
-    Await(JsValue),
-    /// `yield`: suspend the frame, resuming at `resume_pc` (quickjs
-    /// `OP_yield`, quickjs.c:20871).
-    Yield {
-        value: JsValue,
-        resume_pc: usize,
-    },
+    Return,
+    Await,
+    /// `yield`: suspend the frame at `frame.pc` (quickjs `OP_yield`,
+    /// quickjs.c:20871).
+    Yield,
 }
 
 pub(crate) enum RunOutcome {
@@ -67,8 +68,13 @@ pub(crate) struct Frame {
     pub(crate) event_loop: EventLoop,
     /// Flat slot storage for non-capturing functions, mirroring
     /// `JSStackFrame.slots`. Each entry is `(offset, size)`.
-    pub(crate) local_frames: SmallVec<[(usize, usize); 4]>,
-    pub(crate) locals: SmallVec<[JsValue; 4]>,
+    pub(crate) local_frames: Vec<(usize, usize)>,
+    /// Base and size of the innermost local scope, cached so the dominant
+    /// `depth == 0` access does not walk `local_frames` (QuickJS keeps the
+    /// equivalent in `JSStackFrame.slots`).
+    pub(crate) local_offset: usize,
+    pub(crate) local_size: usize,
+    pub(crate) locals: Vec<JsValue>,
     pub(crate) this: JsValue,
     pub(crate) callee: Option<JsValue>,
     pub(crate) stack: ValueStack,
@@ -84,8 +90,10 @@ impl Frame {
             definition: FunctionDef::empty(),
             env: None,
             event_loop: EventLoop::Locals,
-            local_frames: SmallVec::new(),
-            locals: SmallVec::new(),
+            local_frames: Vec::new(),
+            local_offset: 0,
+            local_size: 0,
+            locals: Vec::new(),
             this: JsValue::Undefined,
             callee: None,
             stack: ValueStack::new(),
@@ -101,11 +109,14 @@ impl Frame {
         self.local_frames.clear();
         self.locals.clear();
         self.handlers.clear();
+        self.local_offset = 0;
+        self.local_size = 0;
         if !use_env {
             let size = self.definition.env_size as usize;
             self.locals.resize(size, JsValue::Undefined);
             self.local_frames.push((0, size));
-            if self.definition.name.as_ref() == "<class_fields>" {
+            self.local_size = size;
+            if self.definition.is_class_fields {
                 for slot in 0..size {
                     self.locals[slot] = crate::object::Object::from_value(&self.this)
                         .map(|object| object.get(&slot.to_string()))
@@ -114,7 +125,7 @@ impl Frame {
             }
             return;
         }
-        if self.definition.name.as_ref() == "<class_fields>"
+        if self.definition.is_class_fields
             && let Some(env) = &self.env
         {
             super::call::copy_this_fields(&self.this, env, self.definition.env_size as usize);
@@ -128,8 +139,11 @@ impl Frame {
         self.handlers.clear();
         self.locals.clear();
         self.local_frames.clear();
+        self.local_offset = 0;
+        self.local_size = 0;
         self.env = None;
-        self.definition = FunctionDef::empty();
+        // `definition` is overwritten before the frame runs again; leaving
+        // the Rc in place avoids a thread-local lookup per call.
         self.this = JsValue::Undefined;
         self.callee = None;
         self.completion = None;
@@ -139,10 +153,29 @@ impl Frame {
     pub(crate) fn restore_scope(&mut self, local_frames: usize, locals: usize) {
         self.local_frames.truncate(local_frames);
         self.locals.truncate(locals);
+        match self.local_frames.last() {
+            Some((offset, size)) => {
+                self.local_offset = *offset;
+                self.local_size = *size;
+            }
+            None => {
+                self.local_offset = 0;
+                self.local_size = 0;
+            }
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn get_var(&self, depth: u16, slot: u16) -> JsValue {
+        if self.event_loop == EventLoop::Locals && depth == 0 {
+            let slot = slot as usize;
+            if slot < self.local_size
+                && let Some(value) = self.locals.get(self.local_offset + slot)
+            {
+                return value.clone();
+            }
+            return JsValue::Undefined;
+        }
         match self.event_loop {
             EventLoop::Env => self
                 .env
@@ -150,31 +183,35 @@ impl Frame {
                 .map(|env| env.get(depth as usize, slot as usize))
                 .unwrap_or(JsValue::Undefined),
             EventLoop::Locals => {
-                let (offset, size) = if depth == 0 {
-                    match self.local_frames.last() {
-                        Some(frame) => *frame,
-                        None => return JsValue::Undefined,
-                    }
-                } else {
-                    let count = self.local_frames.len();
-                    let depth = depth as usize;
-                    if depth >= count {
-                        return JsValue::Undefined;
-                    }
-                    self.local_frames[count - 1 - depth]
-                };
-                let slot = slot as usize;
-                if slot < size {
-                    self.locals[offset + slot].clone()
-                } else {
-                    JsValue::Undefined
+                let count = self.local_frames.len();
+                let depth = depth as usize;
+                if depth >= count {
+                    return JsValue::Undefined;
                 }
+                let (offset, size) = self.local_frames[count - 1 - depth];
+                let slot = slot as usize;
+                if slot >= size {
+                    return JsValue::Undefined;
+                }
+                self.locals
+                    .get(offset + slot)
+                    .cloned()
+                    .unwrap_or(JsValue::Undefined)
             }
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn set_var(&mut self, depth: u16, slot: u16, value: JsValue) {
+        if self.event_loop == EventLoop::Locals && depth == 0 {
+            let slot = slot as usize;
+            if slot < self.local_size
+                && let Some(target) = self.locals.get_mut(self.local_offset + slot)
+            {
+                *target = value;
+            }
+            return;
+        }
         match self.event_loop {
             EventLoop::Env => {
                 if let Some(env) = &self.env {
@@ -182,17 +219,15 @@ impl Frame {
                 }
             }
             EventLoop::Locals => {
-                let frame = if depth == 0 {
-                    self.local_frames.last().copied()
-                } else {
-                    let count = self.local_frames.len();
-                    let depth = depth as usize;
-                    (depth < count).then(|| self.local_frames[count - 1 - depth])
-                };
-                if let Some((offset, size)) = frame {
+                let count = self.local_frames.len();
+                let depth = depth as usize;
+                if depth < count {
+                    let (offset, size) = self.local_frames[count - 1 - depth];
                     let slot = slot as usize;
-                    if slot < size {
-                        self.locals[offset + slot] = value;
+                    if slot < size
+                        && let Some(target) = self.locals.get_mut(offset + slot)
+                    {
+                        *target = value;
                     }
                 }
             }

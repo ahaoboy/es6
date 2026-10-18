@@ -233,11 +233,11 @@ pub fn to_string(realm: &mut Realm, value: JsValue) -> JsResult<String> {
                         let name = data
                             .get_own_value(&PropKey::from("name"))
                             .and_then(|value| value.as_string())
-                            .unwrap_or_else(|| Rc::from("Error"));
+                            .unwrap_or_default();
                         let message = data
                             .get_own_value(&PropKey::from("message"))
-                            .map(|value| value.as_string().unwrap_or_else(|| Rc::from("")))
-                            .unwrap_or_else(|| Rc::from(""));
+                            .map(|value| value.as_string().unwrap_or_default())
+                            .unwrap_or_default();
                         if message.is_empty() {
                             return Ok(name.to_string());
                         }
@@ -382,7 +382,7 @@ pub fn to_property_key(realm: &mut Realm, value: JsValue) -> JsResult<PropKey> {
             if (value as i64) >= 0 && (value as u64) <= MAX_ARRAY_INDEX {
                 PropKey::Index(value as usize)
             } else {
-                PropKey::Str(Rc::from(value.to_string()))
+                PropKey::from(value.to_string())
             },
         ),
         JsValue::Float(value)
@@ -390,15 +390,16 @@ pub fn to_property_key(realm: &mut Realm, value: JsValue) -> JsResult<PropKey> {
         {
             Ok(PropKey::Index(value as usize))
         }
-        JsValue::Float(value) => Ok(PropKey::Str(Rc::from(format_number(value)))),
+        JsValue::Float(value) => Ok(PropKey::from(format_number(value))),
         JsValue::Undefined => Ok(PropKey::from("undefined")),
         JsValue::Null => Ok(PropKey::from("null")),
         JsValue::Bool(value) => Ok(PropKey::from(if value { "true" } else { "false" })),
         JsValue::Symbol(id) => Ok(PropKey::Symbol(id)),
-        JsValue::Object(_) => Ok(PropKey::Str(Rc::from(to_string(realm, value)?))),
+        JsValue::Object(_) => Ok(PropKey::from(to_string(realm, value)?)),
     }
 }
 
+#[inline(never)]
 pub fn add_values(realm: &mut Realm, left: JsValue, right: JsValue) -> JsResult<JsValue> {
     if let (Some(left), Some(right)) = (left.as_number(), right.as_number()) {
         return Ok(JsValue::number(left + right));

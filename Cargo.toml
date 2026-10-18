@@ -14,6 +14,7 @@ path = []
 timers = []
 
 [dependencies]
+compact_str = "0.10"
 indexmap = "2"
 unicode-ident = "1"
 ryu = "1"
@@ -32,3 +33,5 @@ miette = { version = "7", features = ["fancy"], optional = true }
 name = "es6"
 path = "src/main.rs"
 required-features = ["cli"]
+
+

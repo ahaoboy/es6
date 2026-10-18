@@ -225,6 +225,16 @@ pub(super) fn expression_to_pattern(expression: &Expr) -> Option<Pattern> {
     }
 }
 
+pub(super) fn comparison_op(op: BinaryOp) -> Option<CompareOp> {
+    Some(match op {
+        BinaryOp::Lt => CompareOp::Lt,
+        BinaryOp::Le => CompareOp::Le,
+        BinaryOp::Gt => CompareOp::Gt,
+        BinaryOp::Ge => CompareOp::Ge,
+        _ => return None,
+    })
+}
+
 pub(super) fn binary_op(op: BinaryOp) -> Op {
     match op {
         BinaryOp::Add => Op::Add,
