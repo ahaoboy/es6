@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use super::frame::{EventLoop, Frame, Handler, Step};
+use super::frame::{Frame, Handler, Step};
 use super::{ArgumentStack, ValueStack, constant_string, constant_strings};
 use crate::bytecode::{CompareOp, Constant, FunctionDef, Op};
 use crate::object::{Object, ObjectData, ObjectKind, PropKey, Property, RegExpData};
@@ -19,8 +19,8 @@ use super::call::{
 };
 use super::iter::{iterable_items, push_array_value};
 use super::property::{
-    cached_get_property, cached_set_property, get_element_value, get_value_property,
-    pop_property_key, property_key_from_constant, set_element_value, set_value_property,
+    get_element_value, get_value_property, pop_property_key, property_key_from_constant,
+    set_element_value, set_value_property,
 };
 
 /// Opcode dispatch. This is the Rust counterpart of the giant switch in
@@ -131,10 +131,14 @@ pub(crate) fn execute_op(
             let value = pop(&mut frame.stack)?;
             let object = frame.get_var(depth, slot);
             match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_set_property(realm, &object, &key, &value, prop_cache)?;
-                }
+                Some(prop_cache) => super::property::cached_set_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    &value,
+                    prop_cache,
+                )?,
                 None => {
                     set_value_property(realm, &object, &PropKey::from(""), value.clone(), true)?
                 }
@@ -145,10 +149,14 @@ pub(crate) fn execute_op(
             let value = pop(&mut frame.stack)?;
             let object = frame.this.clone();
             match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_set_property(realm, &object, &key, &value, prop_cache)?;
-                }
+                Some(prop_cache) => super::property::cached_set_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    &value,
+                    prop_cache,
+                )?,
                 None => {
                     set_value_property(realm, &object, &PropKey::from(""), value.clone(), true)?
                 }
@@ -165,10 +173,13 @@ pub(crate) fn execute_op(
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let object = frame.get_var(depth, slot);
             let function = match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_get_property(realm, &object, &key, prop_cache)?
-                }
+                Some(prop_cache) => super::property::cached_get_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    prop_cache,
+                )?,
                 None => get_value_property(realm, &object, &PropKey::from(""))?,
             };
             let value = call_value_owned(realm, function, object, arguments)?;
@@ -178,10 +189,13 @@ pub(crate) fn execute_op(
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let object = frame.this.clone();
             let function = match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_get_property(realm, &object, &key, prop_cache)?
-                }
+                Some(prop_cache) => super::property::cached_get_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    prop_cache,
+                )?,
                 None => get_value_property(realm, &object, &PropKey::from(""))?,
             };
             let value = call_value_owned(realm, function, object, arguments)?;
@@ -298,10 +312,13 @@ pub(crate) fn execute_op(
         Op::GetPropConst { key, cache } => {
             let object = pop(&mut frame.stack)?;
             let value = match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_get_property(realm, &object, &key, prop_cache)?
-                }
+                Some(prop_cache) => super::property::cached_get_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    prop_cache,
+                )?,
                 None => {
                     let key = property_key_from_constant(&frame.definition, key)?;
                     get_value_property(realm, &object, &key)?
@@ -332,10 +349,14 @@ pub(crate) fn execute_op(
             let value = pop(&mut frame.stack)?;
             let object = pop(&mut frame.stack)?;
             match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => {
-                    let key = cached_key(&frame.definition, key, prop_cache)?;
-                    cached_set_property(realm, &object, &key, &value, prop_cache)?;
-                }
+                Some(prop_cache) => super::property::cached_set_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    &value,
+                    prop_cache,
+                )?,
                 None => {
                     let key = property_key_from_constant(&frame.definition, key)?;
                     set_value_property(realm, &object, &key, value, true)?;
@@ -1027,41 +1048,40 @@ pub(crate) fn execute_op(
                 .stack
                 .push(if prefix { new } else { JsValue::number(number) });
         }
-        Op::PushEnv(size) => match frame.event_loop {
-            EventLoop::Env => {
-                frame.env = Some(Env::new(size as usize, Some(frame.env().clone())));
+        Op::PushEnv(size) => {
+            let size = size as usize;
+
+            let offset = frame.locals.len();
+            frame.locals.resize(offset + size, JsValue::Undefined);
+            frame.local_frames.push((offset, size));
+            frame.local_offset = offset;
+            frame.local_size = size;
+            // Captured bindings of this scope live in a parallel environment
+            // frame; flat storage still serves the uncaptured ones.
+            if let Some(parent) = frame.env.clone() {
+                frame.env = Some(Env::new(size, Some(parent)));
             }
-            EventLoop::Locals => {
-                let offset = frame.locals.len();
-                let size = size as usize;
-                frame.locals.resize(offset + size, JsValue::Undefined);
-                frame.local_frames.push((offset, size));
-                frame.local_offset = offset;
-                frame.local_size = size;
-            }
-        },
+        }
         Op::PopEnv => {
-            if frame.event_loop == EventLoop::Env {
-                let parent = frame.env().parent.clone();
-                match parent {
-                    Some(parent) => frame.env = Some(parent),
-                    None => return Err(realm.type_error("Environment underflow")),
-                }
-            } else if frame.local_frames.len() > 1 {
-                let (offset, _) = frame.local_frames.pop().unwrap();
-                frame.locals.truncate(offset);
-                match frame.local_frames.last() {
-                    Some((offset, size)) => {
-                        frame.local_offset = *offset;
-                        frame.local_size = *size;
-                    }
-                    None => {
-                        frame.local_offset = 0;
-                        frame.local_size = 0;
-                    }
-                }
-            } else {
+            if frame.local_frames.len() <= 1 {
                 return Err(realm.type_error("Environment underflow"));
+            }
+            let (offset, _) = frame.local_frames.pop().unwrap();
+            frame.locals.truncate(offset);
+            match frame.local_frames.last() {
+                Some((offset, size)) => {
+                    frame.local_offset = *offset;
+                    frame.local_size = *size;
+                }
+                None => {
+                    frame.local_offset = 0;
+                    frame.local_size = 0;
+                }
+            }
+            if let Some(env) = &frame.env
+                && let Some(parent) = env.parent.clone()
+            {
+                frame.env = Some(parent);
             }
         }
         Op::Closure(index) => {
@@ -1393,21 +1413,6 @@ fn pop_array(stack: &mut ValueStack) -> JsResult<Vec<JsValue>> {
         }
         _ => Ok(Vec::new()),
     }
-}
-
-/// Build (once) and reuse the canonical key of a property-access site.
-#[inline]
-fn cached_key(
-    definition: &FunctionDef,
-    index: u32,
-    cache: &std::cell::RefCell<crate::object::PropCache>,
-) -> JsResult<PropKey> {
-    if let Some(key) = &cache.borrow().key {
-        return Ok(key.clone());
-    }
-    let key = property_key_from_constant(definition, index)?;
-    cache.borrow_mut().key = Some(key.clone());
-    Ok(key)
 }
 
 fn constant_value(

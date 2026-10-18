@@ -1,418 +1,14 @@
 //! Free helper functions: name collection, rguments usage analysis,
 //! static-key extraction and operator tables.
 
+use std::collections::HashSet;
+
 use super::*;
 
 pub(super) fn pattern_names(pattern: &Pattern) -> Vec<String> {
     let mut names = Vec::new();
     collect_pattern_names(pattern, &mut names);
     names
-}
-
-/// Whether any nested function or class inside `body` textually references
-/// one of `names`. QuickJS only materializes a fresh binding per `for`-`let`
-/// iteration when the loop variable is captured (`resolve_variables`,
-/// quickjs.c:35111); this is the conservative static stand-in: a name that
-/// only appears in nested functions keeps the per-iteration environment, and
-/// shadowing merely over-approximates in the safe direction.
-pub(super) fn body_captures_names(body: &Stmt, names: &[String]) -> bool {
-    // Inner walkers: called once inside a nested function; plain identifiers
-    // here are captures.
-    fn scan_statements(statements: &[Stmt], names: &[String]) -> bool {
-        statements
-            .iter()
-            .any(|statement| scan_statement(statement, names))
-    }
-    fn scan_statement(statement: &Stmt, names: &[String]) -> bool {
-        match &statement.kind {
-            StmtKind::Block(statements) => scan_statements(statements, names),
-            StmtKind::Var(declaration) => declaration.declarations.iter().any(|declarator| {
-                declarator
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| scan_expression(init, names))
-            }),
-            StmtKind::Function(function) => scan_function(function, names),
-            StmtKind::Class(class) => scan_class(class, names),
-            StmtKind::Expr(expression) | StmtKind::Throw(expression) => {
-                scan_expression(expression, names)
-            }
-            StmtKind::Return(expression) => expression
-                .as_ref()
-                .is_some_and(|expression| scan_expression(expression, names)),
-            StmtKind::If {
-                test,
-                consequent,
-                alternate,
-            } => {
-                scan_expression(test, names)
-                    || scan_statement(consequent, names)
-                    || alternate
-                        .as_ref()
-                        .is_some_and(|alternate| scan_statement(alternate, names))
-            }
-            StmtKind::While { test, body } | StmtKind::DoWhile { body, test } => {
-                scan_expression(test, names) || scan_statement(body, names)
-            }
-            StmtKind::For {
-                init,
-                test,
-                update,
-                body,
-            } => {
-                init.as_ref().is_some_and(|init| match init {
-                    ForInit::Var(declaration) => {
-                        declaration.declarations.iter().any(|declarator| {
-                            declarator
-                                .init
-                                .as_ref()
-                                .is_some_and(|init| scan_expression(init, names))
-                        })
-                    }
-                    ForInit::Expr(expression) => scan_expression(expression, names),
-                }) || test
-                    .as_ref()
-                    .is_some_and(|test| scan_expression(test, names))
-                    || update
-                        .as_ref()
-                        .is_some_and(|update| scan_expression(update, names))
-                    || scan_statement(body, names)
-            }
-            StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body } => {
-                let left_expression = match left {
-                    ForInit::Var(declaration) => {
-                        declaration.declarations.iter().any(|declarator| {
-                            declarator
-                                .init
-                                .as_ref()
-                                .is_some_and(|init| scan_expression(init, names))
-                        })
-                    }
-                    ForInit::Expr(expression) => scan_expression(expression, names),
-                };
-                left_expression || scan_expression(right, names) || scan_statement(body, names)
-            }
-            StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Empty | StmtKind::Debugger => {
-                false
-            }
-            StmtKind::Try {
-                block,
-                handler,
-                finalizer,
-            } => {
-                scan_statements(block, names)
-                    || handler
-                        .as_ref()
-                        .is_some_and(|handler| scan_statements(&handler.body, names))
-                    || finalizer
-                        .as_ref()
-                        .is_some_and(|finalizer| scan_statements(finalizer, names))
-            }
-            StmtKind::Switch {
-                discriminant,
-                cases,
-            } => {
-                scan_expression(discriminant, names)
-                    || cases.iter().any(|case| scan_statements(&case.body, names))
-            }
-            StmtKind::Labeled { body, .. } => scan_statement(body, names),
-            StmtKind::Import(_) | StmtKind::Export(_) => false,
-        }
-    }
-    fn scan_function(function: &Function, names: &[String]) -> bool {
-        match &function.body {
-            FunctionBody::Block(statements) => scan_statements(statements, names),
-            FunctionBody::Expr(expression) => scan_expression(expression, names),
-        }
-    }
-    fn scan_class(class: &ClassDecl, names: &[String]) -> bool {
-        class.elements.iter().any(|element| {
-            element
-                .value
-                .as_ref()
-                .is_some_and(|value| scan_expression(value, names))
-                || element
-                    .function
-                    .as_ref()
-                    .is_some_and(|function| scan_function(function, names))
-        })
-    }
-    fn scan_expression(expression: &Expr, names: &[String]) -> bool {
-        match &expression.kind {
-            ExprKind::Ident(name) => names.iter().any(|captured| captured == name),
-            ExprKind::Function(function) | ExprKind::Arrow(function) => {
-                scan_function(function, names)
-            }
-            ExprKind::Class(class) => scan_class(class, names),
-            ExprKind::This | ExprKind::Literal(_) => false,
-            ExprKind::Array(elements) => elements.iter().any(|element| match element {
-                ArrayElement::Hole => false,
-                ArrayElement::Expr(expression) | ArrayElement::Spread(expression) => {
-                    scan_expression(expression, names)
-                }
-            }),
-            ExprKind::Object(properties) => properties.iter().any(|property| match property {
-                ObjectProperty::KeyValue { value, .. } => scan_expression(value, names),
-                ObjectProperty::Shorthand(_) => false,
-                ObjectProperty::Spread(expression) => scan_expression(expression, names),
-                ObjectProperty::Method { function, .. } => scan_function(function, names),
-            }),
-            ExprKind::Unary { argument, .. }
-            | ExprKind::Update { argument, .. }
-            | ExprKind::Spread(argument)
-            | ExprKind::Await(argument)
-            | ExprKind::YieldStar(argument) => scan_expression(argument, names),
-            ExprKind::Yield(argument) => argument
-                .as_ref()
-                .is_some_and(|argument| scan_expression(argument, names)),
-            ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
-                scan_expression(left, names) || scan_expression(right, names)
-            }
-            ExprKind::Assign { target, value, .. } => {
-                scan_expression(target, names) || scan_expression(value, names)
-            }
-            ExprKind::Conditional {
-                test,
-                consequent,
-                alternate,
-            } => {
-                scan_expression(test, names)
-                    || scan_expression(consequent, names)
-                    || scan_expression(alternate, names)
-            }
-            ExprKind::Sequence(expressions) => expressions
-                .iter()
-                .any(|expression| scan_expression(expression, names)),
-            ExprKind::Member {
-                object, property, ..
-            } => {
-                scan_expression(object, names)
-                    || match property {
-                        MemberProperty::Ident(_) => false,
-                        MemberProperty::Computed(expression) => scan_expression(expression, names),
-                    }
-            }
-            ExprKind::Call {
-                callee, arguments, ..
-            } => {
-                scan_expression(callee, names)
-                    || arguments.iter().any(|argument| match argument {
-                        Argument::Expr(expression) | Argument::Spread(expression) => {
-                            scan_expression(expression, names)
-                        }
-                    })
-            }
-            ExprKind::New { callee, arguments } => {
-                scan_expression(callee, names)
-                    || arguments.iter().any(|argument| match argument {
-                        Argument::Expr(expression) | Argument::Spread(expression) => {
-                            scan_expression(expression, names)
-                        }
-                    })
-            }
-            ExprKind::Template { expressions, .. } => expressions
-                .iter()
-                .any(|expression| scan_expression(expression, names)),
-            ExprKind::TaggedTemplate {
-                tag, expressions, ..
-            } => {
-                scan_expression(tag, names)
-                    || expressions
-                        .iter()
-                        .any(|expression| scan_expression(expression, names))
-            }
-        }
-    }
-
-    // Outer walkers: only descend to find nested function/class nodes; plain
-    // identifiers at this level are ordinary loop-body uses, not captures.
-    fn find_statements(statements: &[Stmt], names: &[String]) -> bool {
-        statements
-            .iter()
-            .any(|statement| find_statement(statement, names))
-    }
-    fn find_statement(statement: &Stmt, names: &[String]) -> bool {
-        match &statement.kind {
-            StmtKind::Function(function) => scan_function(function, names),
-            StmtKind::Class(class) => scan_class(class, names),
-            StmtKind::Block(statements) => find_statements(statements, names),
-            StmtKind::Var(declaration) => declaration.declarations.iter().any(|declarator| {
-                declarator
-                    .init
-                    .as_ref()
-                    .is_some_and(|init| find_expression(init, names))
-            }),
-            StmtKind::Expr(expression) | StmtKind::Throw(expression) => {
-                find_expression(expression, names)
-            }
-            StmtKind::Return(expression) => expression
-                .as_ref()
-                .is_some_and(|expression| find_expression(expression, names)),
-            StmtKind::If {
-                test,
-                consequent,
-                alternate,
-            } => {
-                find_expression(test, names)
-                    || find_statement(consequent, names)
-                    || alternate
-                        .as_ref()
-                        .is_some_and(|alternate| find_statement(alternate, names))
-            }
-            StmtKind::While { test, body } | StmtKind::DoWhile { body, test } => {
-                find_expression(test, names) || find_statement(body, names)
-            }
-            StmtKind::For {
-                init,
-                test,
-                update,
-                body,
-            } => {
-                init.as_ref().is_some_and(|init| match init {
-                    ForInit::Var(declaration) => {
-                        declaration.declarations.iter().any(|declarator| {
-                            declarator
-                                .init
-                                .as_ref()
-                                .is_some_and(|init| find_expression(init, names))
-                        })
-                    }
-                    ForInit::Expr(expression) => find_expression(expression, names),
-                }) || test
-                    .as_ref()
-                    .is_some_and(|test| find_expression(test, names))
-                    || update
-                        .as_ref()
-                        .is_some_and(|update| find_expression(update, names))
-                    || find_statement(body, names)
-            }
-            StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body } => {
-                let left_expression = match left {
-                    ForInit::Var(declaration) => {
-                        declaration.declarations.iter().any(|declarator| {
-                            declarator
-                                .init
-                                .as_ref()
-                                .is_some_and(|init| find_expression(init, names))
-                        })
-                    }
-                    ForInit::Expr(expression) => find_expression(expression, names),
-                };
-                left_expression || find_expression(right, names) || find_statement(body, names)
-            }
-            StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Empty | StmtKind::Debugger => {
-                false
-            }
-            StmtKind::Try {
-                block,
-                handler,
-                finalizer,
-            } => {
-                find_statements(block, names)
-                    || handler
-                        .as_ref()
-                        .is_some_and(|handler| find_statements(&handler.body, names))
-                    || finalizer
-                        .as_ref()
-                        .is_some_and(|finalizer| find_statements(finalizer, names))
-            }
-            StmtKind::Switch {
-                discriminant,
-                cases,
-            } => {
-                find_expression(discriminant, names)
-                    || cases.iter().any(|case| find_statements(&case.body, names))
-            }
-            StmtKind::Labeled { body, .. } => find_statement(body, names),
-            StmtKind::Import(_) | StmtKind::Export(_) => false,
-        }
-    }
-    fn find_expression(expression: &Expr, names: &[String]) -> bool {
-        match &expression.kind {
-            ExprKind::Function(function) | ExprKind::Arrow(function) => {
-                scan_function(function, names)
-            }
-            ExprKind::Class(class) => scan_class(class, names),
-            ExprKind::Ident(_) | ExprKind::This | ExprKind::Literal(_) => false,
-            ExprKind::Array(elements) => elements.iter().any(|element| match element {
-                ArrayElement::Hole => false,
-                ArrayElement::Expr(expression) | ArrayElement::Spread(expression) => {
-                    find_expression(expression, names)
-                }
-            }),
-            ExprKind::Object(properties) => properties.iter().any(|property| match property {
-                ObjectProperty::KeyValue { value, .. } => find_expression(value, names),
-                ObjectProperty::Shorthand(_) => false,
-                ObjectProperty::Spread(expression) => find_expression(expression, names),
-                ObjectProperty::Method { function, .. } => scan_function(function, names),
-            }),
-            ExprKind::Unary { argument, .. }
-            | ExprKind::Update { argument, .. }
-            | ExprKind::Spread(argument)
-            | ExprKind::Await(argument)
-            | ExprKind::YieldStar(argument) => find_expression(argument, names),
-            ExprKind::Yield(argument) => argument
-                .as_ref()
-                .is_some_and(|argument| find_expression(argument, names)),
-            ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
-                find_expression(left, names) || find_expression(right, names)
-            }
-            ExprKind::Assign { target, value, .. } => {
-                find_expression(target, names) || find_expression(value, names)
-            }
-            ExprKind::Conditional {
-                test,
-                consequent,
-                alternate,
-            } => {
-                find_expression(test, names)
-                    || find_expression(consequent, names)
-                    || find_expression(alternate, names)
-            }
-            ExprKind::Sequence(expressions) => expressions
-                .iter()
-                .any(|expression| find_expression(expression, names)),
-            ExprKind::Member {
-                object, property, ..
-            } => {
-                find_expression(object, names)
-                    || match property {
-                        MemberProperty::Ident(_) => false,
-                        MemberProperty::Computed(expression) => find_expression(expression, names),
-                    }
-            }
-            ExprKind::Call {
-                callee, arguments, ..
-            } => {
-                find_expression(callee, names)
-                    || arguments.iter().any(|argument| match argument {
-                        Argument::Expr(expression) | Argument::Spread(expression) => {
-                            find_expression(expression, names)
-                        }
-                    })
-            }
-            ExprKind::New { callee, arguments } => {
-                find_expression(callee, names)
-                    || arguments.iter().any(|argument| match argument {
-                        Argument::Expr(expression) | Argument::Spread(expression) => {
-                            find_expression(expression, names)
-                        }
-                    })
-            }
-            ExprKind::Template { expressions, .. } => expressions
-                .iter()
-                .any(|expression| find_expression(expression, names)),
-            ExprKind::TaggedTemplate {
-                tag, expressions, ..
-            } => {
-                find_expression(tag, names)
-                    || expressions
-                        .iter()
-                        .any(|expression| find_expression(expression, names))
-            }
-        }
-    }
-    find_statement(body, names)
 }
 
 pub(super) fn collect_pattern_names(pattern: &Pattern, names: &mut Vec<String>) {
@@ -950,5 +546,324 @@ pub(super) fn format_number(value: f64) -> String {
     } else {
         let mut buffer = ryu::Buffer::new();
         buffer.format(value).to_owned()
+    }
+}
+
+/// Identifiers referenced from nested functions or classes inside `statements`.
+///
+/// These are exactly the bindings of the enclosing function that must live in
+/// its environment (QuickJS marks them `is_captured` in `resolve_variables`,
+/// quickjs.c:35111). The scan over-approximates shadowing in the safe
+/// direction: a binding placed in the environment still behaves correctly,
+/// only the flat fast path is lost.
+pub(super) fn nested_references(statements: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    scan_refs_statements(statements, false, &mut names);
+    names
+}
+
+pub(super) fn nested_references_body(body: &FunctionBody) -> HashSet<String> {
+    let mut names = HashSet::new();
+    match body {
+        FunctionBody::Block(statements) => scan_refs_statements(statements, false, &mut names),
+        FunctionBody::Expr(expression) => scan_refs_expression(expression, false, &mut names),
+    }
+    names
+}
+
+fn scan_refs_statements(statements: &[Stmt], nested: bool, names: &mut HashSet<String>) {
+    for statement in statements {
+        scan_refs_statement(statement, nested, names);
+    }
+}
+
+fn scan_refs_statement(statement: &Stmt, nested: bool, names: &mut HashSet<String>) {
+    match &statement.kind {
+        StmtKind::Empty
+        | StmtKind::Break(_)
+        | StmtKind::Continue(_)
+        | StmtKind::Debugger
+        | StmtKind::Import(_) => {}
+        StmtKind::Expr(expression) | StmtKind::Throw(expression) => {
+            scan_refs_expression(expression, nested, names);
+        }
+        StmtKind::Return(expression) => {
+            if let Some(expression) = expression {
+                scan_refs_expression(expression, nested, names);
+            }
+        }
+        StmtKind::Block(statements) => scan_refs_statements(statements, nested, names),
+        StmtKind::Var(declaration) => scan_refs_declaration(declaration, nested, names),
+        StmtKind::Function(function) => scan_refs_function(function, names),
+        StmtKind::Class(class) => scan_refs_class(class, names),
+        StmtKind::Export(export) => match &export.kind {
+            ExportKind::Default(expression) => scan_refs_expression(expression, nested, names),
+            ExportKind::Declaration(statement) => scan_refs_statement(statement, nested, names),
+            ExportKind::Named(_) | ExportKind::All { .. } => {}
+        },
+        StmtKind::If {
+            test,
+            consequent,
+            alternate,
+        } => {
+            scan_refs_expression(test, nested, names);
+            scan_refs_statement(consequent, nested, names);
+            if let Some(alternate) = alternate {
+                scan_refs_statement(alternate, nested, names);
+            }
+        }
+        StmtKind::While { test, body } => {
+            scan_refs_expression(test, nested, names);
+            scan_refs_statement(body, nested, names);
+        }
+        StmtKind::DoWhile { body, test } => {
+            scan_refs_statement(body, nested, names);
+            scan_refs_expression(test, nested, names);
+        }
+        StmtKind::For {
+            init,
+            test,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                match init {
+                    ForInit::Var(declaration) => scan_refs_declaration(declaration, nested, names),
+                    ForInit::Expr(expression) => scan_refs_expression(expression, nested, names),
+                }
+            }
+            if let Some(test) = test {
+                scan_refs_expression(test, nested, names);
+            }
+            if let Some(update) = update {
+                scan_refs_expression(update, nested, names);
+            }
+            scan_refs_statement(body, nested, names);
+        }
+        StmtKind::ForIn { left, right, body } | StmtKind::ForOf { left, right, body } => {
+            match left {
+                ForInit::Var(declaration) => scan_refs_declaration(declaration, nested, names),
+                ForInit::Expr(expression) => scan_refs_expression(expression, nested, names),
+            }
+            scan_refs_expression(right, nested, names);
+            scan_refs_statement(body, nested, names);
+        }
+        StmtKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            scan_refs_statements(block, nested, names);
+            if let Some(handler) = handler {
+                if let Some(param) = &handler.param {
+                    scan_refs_pattern(param, nested, names);
+                }
+                scan_refs_statements(&handler.body, nested, names);
+            }
+            if let Some(finalizer) = finalizer {
+                scan_refs_statements(finalizer, nested, names);
+            }
+        }
+        StmtKind::Switch {
+            discriminant,
+            cases,
+        } => {
+            scan_refs_expression(discriminant, nested, names);
+            for case in cases {
+                if let Some(test) = &case.test {
+                    scan_refs_expression(test, nested, names);
+                }
+                scan_refs_statements(&case.body, nested, names);
+            }
+        }
+        StmtKind::Labeled { body, .. } => scan_refs_statement(body, nested, names),
+    }
+}
+
+fn scan_refs_declaration(declaration: &VarDecl, nested: bool, names: &mut HashSet<String>) {
+    for declarator in &declaration.declarations {
+        scan_refs_pattern(&declarator.pattern, nested, names);
+        if let Some(init) = &declarator.init {
+            scan_refs_expression(init, nested, names);
+        }
+    }
+}
+
+/// Only default values and computed keys are references; the bound names are
+/// declarations of the nested scope.
+fn scan_refs_pattern(pattern: &Pattern, nested: bool, names: &mut HashSet<String>) {
+    match pattern {
+        Pattern::Ident(_) => {}
+        Pattern::Rest(inner) => scan_refs_pattern(inner, nested, names),
+        Pattern::Array(elements) => {
+            for element in elements.iter().flatten() {
+                scan_refs_pattern(element, nested, names);
+            }
+        }
+        Pattern::Object(properties) => {
+            for property in properties {
+                if let PropertyName::Computed(expression) = &property.key {
+                    scan_refs_expression(expression, nested, names);
+                }
+                scan_refs_pattern(&property.value, nested, names);
+            }
+        }
+        Pattern::Assign { target, default } => {
+            scan_refs_pattern(target, nested, names);
+            scan_refs_expression(default, nested, names);
+        }
+    }
+}
+
+fn scan_refs_function(function: &Function, names: &mut HashSet<String>) {
+    for param in &function.params {
+        scan_refs_pattern(param, true, names);
+    }
+    match &function.body {
+        FunctionBody::Block(statements) => scan_refs_statements(statements, true, names),
+        FunctionBody::Expr(expression) => scan_refs_expression(expression, true, names),
+    }
+}
+
+fn scan_refs_class(class: &ClassDecl, names: &mut HashSet<String>) {
+    if let Some(super_class) = &class.super_class {
+        scan_refs_expression(super_class, true, names);
+    }
+    for element in &class.elements {
+        if let PropertyName::Computed(expression) = &element.key {
+            scan_refs_expression(expression, true, names);
+        }
+        if let Some(value) = &element.value {
+            scan_refs_expression(value, true, names);
+        }
+        if let Some(function) = &element.function {
+            scan_refs_function(function, names);
+        }
+    }
+}
+
+fn scan_refs_expression(expression: &Expr, nested: bool, names: &mut HashSet<String>) {
+    match &expression.kind {
+        ExprKind::Literal(_) | ExprKind::This => {}
+        ExprKind::Ident(name) => {
+            if nested {
+                names.insert(name.clone());
+            }
+        }
+        ExprKind::Function(function) | ExprKind::Arrow(function) => {
+            scan_refs_function(function, names);
+        }
+        ExprKind::Class(class) => scan_refs_class(class, names),
+        ExprKind::Array(elements) => {
+            for element in elements {
+                match element {
+                    ArrayElement::Hole => {}
+                    ArrayElement::Expr(expression) | ArrayElement::Spread(expression) => {
+                        scan_refs_expression(expression, nested, names);
+                    }
+                }
+            }
+        }
+        ExprKind::Object(properties) => {
+            for property in properties {
+                match property {
+                    ObjectProperty::KeyValue { key, value } => {
+                        if let PropertyName::Computed(expression) = key {
+                            scan_refs_expression(expression, nested, names);
+                        }
+                        scan_refs_expression(value, nested, names);
+                    }
+                    ObjectProperty::Shorthand(name) => {
+                        if nested {
+                            names.insert(name.clone());
+                        }
+                    }
+                    ObjectProperty::Spread(expression) => {
+                        scan_refs_expression(expression, nested, names);
+                    }
+                    ObjectProperty::Method { key, function, .. } => {
+                        if let PropertyName::Computed(expression) = key {
+                            scan_refs_expression(expression, nested, names);
+                        }
+                        scan_refs_function(function, names);
+                    }
+                }
+            }
+        }
+        ExprKind::Unary { argument, .. }
+        | ExprKind::Update { argument, .. }
+        | ExprKind::Spread(argument)
+        | ExprKind::Await(argument)
+        | ExprKind::YieldStar(argument) => scan_refs_expression(argument, nested, names),
+        ExprKind::Yield(argument) => {
+            if let Some(argument) = argument {
+                scan_refs_expression(argument, nested, names);
+            }
+        }
+        ExprKind::Binary { left, right, .. } | ExprKind::Logical { left, right, .. } => {
+            scan_refs_expression(left, nested, names);
+            scan_refs_expression(right, nested, names);
+        }
+        ExprKind::Assign { target, value, .. } => {
+            scan_refs_expression(target, nested, names);
+            scan_refs_expression(value, nested, names);
+        }
+        ExprKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            scan_refs_expression(test, nested, names);
+            scan_refs_expression(consequent, nested, names);
+            scan_refs_expression(alternate, nested, names);
+        }
+        ExprKind::Sequence(expressions) => {
+            for expression in expressions {
+                scan_refs_expression(expression, nested, names);
+            }
+        }
+        ExprKind::Member {
+            object, property, ..
+        } => {
+            scan_refs_expression(object, nested, names);
+            if let MemberProperty::Computed(expression) = property {
+                scan_refs_expression(expression, nested, names);
+            }
+        }
+        ExprKind::Call {
+            callee, arguments, ..
+        } => {
+            scan_refs_expression(callee, nested, names);
+            for argument in arguments {
+                match argument {
+                    Argument::Expr(expression) | Argument::Spread(expression) => {
+                        scan_refs_expression(expression, nested, names);
+                    }
+                }
+            }
+        }
+        ExprKind::New { callee, arguments } => {
+            scan_refs_expression(callee, nested, names);
+            for argument in arguments {
+                match argument {
+                    Argument::Expr(expression) | Argument::Spread(expression) => {
+                        scan_refs_expression(expression, nested, names);
+                    }
+                }
+            }
+        }
+        ExprKind::Template { expressions, .. } => {
+            for expression in expressions {
+                scan_refs_expression(expression, nested, names);
+            }
+        }
+        ExprKind::TaggedTemplate {
+            tag, expressions, ..
+        } => {
+            scan_refs_expression(tag, nested, names);
+            for expression in expressions {
+                scan_refs_expression(expression, nested, names);
+            }
+        }
     }
 }

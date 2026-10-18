@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::*;
@@ -6,33 +6,48 @@ use crate::bytecode::{ClassDef, ClassMethod, CompareOp, Constant, FunctionDef, O
 use crate::parser::ParseError;
 
 #[derive(Clone)]
+struct Binding {
+    slot: u16,
+    /// Boxed in the environment because a nested function references it
+    /// (QuickJS `is_captured`, quickjs.c:35111).
+    captured: bool,
+}
+
+#[derive(Clone)]
 struct ScopeFrame {
-    bindings: HashMap<String, u16>,
+    bindings: HashMap<String, Binding>,
     size: u16,
-    /// Shared with every child compiler that received this frame through
-    /// `capture_frames`: set once a nested function captures one of its
-    /// bindings. QuickJS derives the same information in `resolve_variables`
-    /// (quickjs.c:35111) and only boxes captured variables; this port keeps
-    /// whole-frame environments but avoids creating them at all when nothing
-    /// is captured.
-    captured: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Names referenced from nested functions of the owning function; a
+    /// declaration whose name is present is stored in the environment.
+    captured_names: Rc<HashSet<String>>,
 }
 
 impl ScopeFrame {
-    fn new() -> Self {
+    fn new(captured_names: Rc<HashSet<String>>) -> Self {
         Self {
             bindings: HashMap::new(),
             size: 0,
-            captured: std::rc::Rc::new(std::cell::Cell::new(false)),
+            captured_names,
+        }
+    }
+
+    /// Slot operand for a binding, tagged when it lives in the environment.
+    fn slot_ref(&self, name: &str) -> u16 {
+        match self.bindings.get(name) {
+            Some(binding) if binding.captured => binding.slot | crate::bytecode::ENV_SLOT,
+            Some(binding) => binding.slot,
+            None => 0,
         }
     }
 
     fn declare(&mut self, name: &str) -> u16 {
-        if let Some(slot) = self.bindings.get(name) {
-            return *slot;
+        if let Some(binding) = self.bindings.get(name) {
+            return binding.slot;
         }
         let slot = self.size;
-        self.bindings.insert(name.to_owned(), slot);
+        let captured = self.captured_names.contains(name);
+        self.bindings
+            .insert(name.to_owned(), Binding { slot, captured });
         self.size += 1;
         slot
     }
@@ -56,6 +71,10 @@ struct LoopContext {
     label: Option<String>,
     env_depth: usize,
     stack_cleanup: usize,
+    /// Operand values to drop when leaving this loop (its iterator, if any).
+    exit_cleanup: usize,
+    /// Index of the loop's own BreakContext, used to find nested loops.
+    break_index: usize,
     try_depth: usize,
     continue_target: Option<usize>,
     continue_jumps: Vec<usize>,
@@ -141,6 +160,9 @@ struct Compiler {
     /// A nested function was compiled that itself needs an environment; the
     /// current function must then provide the environment chain link.
     needs_env_link: bool,
+    /// Label of a loop directly under a label: statement, consumed by the
+    /// loop compiler so continue label resolves.
+    pending_label: Option<String>,
 }
 
 impl Compiler {
@@ -151,7 +173,7 @@ impl Compiler {
             span: Span::default(),
             constants: Vec::new(),
             prop_caches: Vec::new(),
-            local_frames: vec![ScopeFrame::new()],
+            local_frames: vec![ScopeFrame::new(Rc::new(HashSet::new()))],
             captured_frames,
             used_captured: false,
             script,
@@ -165,6 +187,7 @@ impl Compiler {
             source_name,
             super_allowed: false,
             needs_env_link: false,
+            pending_label: None,
         }
     }
 
@@ -182,12 +205,14 @@ impl Compiler {
         }
         // An environment is needed only when a binding is actually captured
         // by a nested function, or when a nested function itself needs an
-        // environment chain link (its `use_env`). This replaces the earlier
-        // "creates any closure" over-approximation.
+        // environment chain link (its `use_env`).
         let use_env = self.used_captured
-            || self.local_frames[0].captured.get()
-            || self.local_frames.iter().any(|frame| frame.captured.get())
+            || self
+                .local_frames
+                .iter()
+                .any(|frame| frame.bindings.values().any(|binding| binding.captured))
             || self.needs_env_link;
+
         FunctionDef {
             name: Rc::from(name),
             code: self.code,
@@ -308,29 +333,40 @@ impl Compiler {
         });
     }
 
+    fn name_is_captured(&self, name: &str) -> bool {
+        self.local_frames[0].captured_names.contains(name)
+    }
+
     fn resolve(&mut self, name: &str) -> Option<VarRef> {
         let local_len = self.local_frames.len();
         for (index, frame) in self.local_frames.iter().enumerate().rev() {
-            if let Some(slot) = frame.bindings.get(name) {
+            if let Some(binding) = frame.bindings.get(name) {
                 return Some(VarRef {
                     depth: (local_len - 1 - index) as u16,
-                    slot: *slot,
+                    slot: if binding.captured {
+                        binding.slot | crate::bytecode::ENV_SLOT
+                    } else {
+                        binding.slot
+                    },
                 });
             }
         }
         for (index, frame) in self.captured_frames.iter().enumerate() {
-            if let Some(slot) = frame.bindings.get(name) {
+            if let Some(binding) = frame.bindings.get(name) {
                 self.used_captured = true;
-                // Mark the defining frame so the ancestor compiler knows it
-                // must materialize an environment for this binding.
-                frame.captured.set(true);
+                // Ancestor bindings are only reachable through the
+                // environment chain.
                 return Some(VarRef {
                     depth: (local_len + index) as u16,
-                    slot: *slot,
+                    slot: binding.slot | crate::bytecode::ENV_SLOT,
                 });
             }
         }
         None
+    }
+
+    fn scope_frame(&self) -> ScopeFrame {
+        ScopeFrame::new(self.local_frames[0].captured_names.clone())
     }
 
     fn capture_frames(&self) -> Vec<ScopeFrame> {
@@ -344,6 +380,8 @@ impl Compiler {
     }
 
     fn compile_script(&mut self, statements: &[Stmt]) -> Result<(), ParseError> {
+        self.local_frames[0].captured_names =
+            Rc::new(crate::compiler::helpers::nested_references(statements));
         // ES module imports are evaluated before the body of the module.
         for statement in statements {
             if let StmtKind::Import(import) = &statement.kind {
@@ -416,6 +454,9 @@ impl Compiler {
         is_declaration: bool,
     ) -> Result<Rc<FunctionDef>, ParseError> {
         let mut child = Compiler::new(false, self.capture_frames(), self.source_name.clone());
+        child.local_frames[0].captured_names = Rc::new(
+            crate::compiler::helpers::nested_references_body(&function.body),
+        );
         child.super_allowed = super_allowed;
         child.strict = self.strict
             || match &function.body {
@@ -430,7 +471,8 @@ impl Compiler {
         let arguments_slot = if function.is_arrow || !function_uses_arguments(function) {
             None
         } else {
-            let slot = child.local_frames[0].declare("arguments");
+            child.local_frames[0].declare("arguments");
+            let slot = child.local_frames[0].slot_ref("arguments");
             child.emit(Op::Arguments);
             child.emit(Op::SetVar { depth: 0, slot });
             Some(())
@@ -446,7 +488,8 @@ impl Compiler {
             && let Some(name) = &function.name
             && !name.is_empty()
         {
-            let slot = child.local_frames[0].declare(name);
+            child.local_frames[0].declare(name);
+            let slot = child.local_frames[0].slot_ref(name);
             child.emit(Op::Callee);
             child.emit(Op::SetVar { depth: 0, slot });
         }

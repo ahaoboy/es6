@@ -228,6 +228,17 @@ impl Compiler {
                 self.compile_switch(discriminant, cases)?;
             }
             StmtKind::Labeled { label, body } => {
+                let is_loop = matches!(
+                    body.kind,
+                    StmtKind::While { .. }
+                        | StmtKind::DoWhile { .. }
+                        | StmtKind::For { .. }
+                        | StmtKind::ForIn { .. }
+                        | StmtKind::ForOf { .. }
+                );
+                if is_loop {
+                    self.pending_label = Some(label.clone());
+                }
                 let context = BreakContext {
                     label: Some(label.clone()),
                     env_depth: self.local_frames.len(),
@@ -236,7 +247,9 @@ impl Compiler {
                     jumps: Vec::new(),
                 };
                 self.breakables.push(context);
-                self.compile_statement(body)?;
+                let result = self.compile_statement(body);
+                self.pending_label = None;
+                result?;
                 let context = self.breakables.pop().unwrap();
                 let end = self.position();
                 for jump in context.jumps {
@@ -263,7 +276,7 @@ impl Compiler {
             }
             return Ok(());
         }
-        let mut frame = ScopeFrame::new();
+        let mut frame = self.scope_frame();
         for name in &names {
             frame.declare(name);
         }
@@ -380,15 +393,18 @@ impl Compiler {
     pub(super) fn compile_while(&mut self, test: &Expr, body: &Stmt) -> Result<(), ParseError> {
         let start = self.position();
         let end_jump = self.emit_test_jump(test, false)?;
+        let label = self.pending_label.take();
         let break_context = BreakContext {
-            label: None,
+            label: label.clone(),
             env_depth: self.local_frames.len(),
             stack_cleanup: 0,
             try_depth: self.try_depth,
             jumps: Vec::new(),
         };
         let loop_context = LoopContext {
-            label: None,
+            label,
+            exit_cleanup: 0,
+            break_index: self.breakables.len(),
             env_depth: self.local_frames.len(),
             stack_cleanup: 0,
             try_depth: self.try_depth,
@@ -414,15 +430,18 @@ impl Compiler {
 
     pub(super) fn compile_do_while(&mut self, body: &Stmt, test: &Expr) -> Result<(), ParseError> {
         let start = self.position();
+        let label = self.pending_label.take();
         let break_context = BreakContext {
-            label: None,
+            label: label.clone(),
             env_depth: self.local_frames.len(),
             stack_cleanup: 0,
             try_depth: self.try_depth,
             jumps: Vec::new(),
         };
         let loop_context = LoopContext {
-            label: None,
+            label,
+            exit_cleanup: 0,
+            break_index: self.breakables.len(),
             env_depth: self.local_frames.len(),
             stack_cleanup: 0,
             try_depth: self.try_depth,
@@ -531,29 +550,7 @@ impl Compiler {
                 .iter()
                 .flat_map(|declarator| pattern_names(&declarator.pattern))
                 .collect();
-            // Probe the test/update expressions too: a nested function there
-            // could also observe the per-iteration binding.
-            let capture_probe = {
-                let mut probe = Vec::new();
-                if let Some(test) = test {
-                    probe.push(Stmt {
-                        kind: StmtKind::Expr(test.clone()),
-                        span: body.span,
-                    });
-                }
-                if let Some(update) = update {
-                    probe.push(Stmt {
-                        kind: StmtKind::Expr(update.clone()),
-                        span: body.span,
-                    });
-                }
-                probe.push(body.clone());
-                Stmt {
-                    kind: StmtKind::Block(probe),
-                    span: body.span,
-                }
-            };
-            if !body_captures_names(&capture_probe, &names) {
+            if !names.iter().any(|name| self.name_is_captured(name)) {
                 let frame = self.local_frames.last_mut().expect("scope frame");
                 for name in &names {
                     frame.declare(name);
@@ -573,15 +570,18 @@ impl Compiler {
                 };
                 let body_start = self.position();
                 let next_plan = self.for_next_plan(test.as_ref(), update.as_ref());
+                let label = self.pending_label.take();
                 let break_context = BreakContext {
-                    label: None,
+                    label: label.clone(),
                     env_depth: self.local_frames.len(),
                     stack_cleanup: 0,
                     try_depth: self.try_depth,
                     jumps: Vec::new(),
                 };
                 let loop_context = LoopContext {
-                    label: None,
+                    label,
+                    exit_cleanup: 0,
+                    break_index: self.breakables.len(),
                     env_depth: self.local_frames.len(),
                     stack_cleanup: 0,
                     try_depth: self.try_depth,
@@ -637,7 +637,7 @@ impl Compiler {
                 let _ = start;
                 return Ok(());
             }
-            let mut frame = ScopeFrame::new();
+            let mut frame = self.scope_frame();
             for declarator in &declaration.declarations {
                 for name in pattern_names(&declarator.pattern) {
                     frame.declare(&name);
@@ -650,36 +650,38 @@ impl Compiler {
             self.compile_var_declaration(declaration)?;
             let loop_depth = self.local_frames.len();
 
-            let start = self.position();
-            let mut iteration = ScopeFrame::new();
+            let mut iteration = self.scope_frame();
             iteration.bindings = bindings.clone();
             iteration.size = size;
             self.local_frames.push(iteration);
             self.emit(Op::PushEnv(size));
-            for slot in bindings.values() {
-                self.emit(Op::GetVar {
-                    depth: 1,
-                    slot: *slot,
-                });
-                self.emit(Op::SetVar {
-                    depth: 0,
-                    slot: *slot,
-                });
+            for binding in bindings.values() {
+                let slot = if binding.captured {
+                    binding.slot | crate::bytecode::ENV_SLOT
+                } else {
+                    binding.slot
+                };
+                self.emit(Op::GetVar { depth: 1, slot });
+                self.emit(Op::SetVar { depth: 0, slot });
             }
+            let start = self.position();
             let end_jump = if let Some(test) = test {
                 Some(self.emit_test_jump(test, false)?)
             } else {
                 None
             };
+            let label = self.pending_label.take();
             let break_context = BreakContext {
-                label: None,
+                label: label.clone(),
                 env_depth: loop_depth,
                 stack_cleanup: 0,
                 try_depth: self.try_depth,
                 jumps: Vec::new(),
             };
             let loop_context = LoopContext {
-                label: None,
+                label,
+                exit_cleanup: 0,
+                break_index: self.breakables.len(),
                 env_depth: self.local_frames.len(),
                 stack_cleanup: 0,
                 try_depth: self.try_depth,
@@ -690,22 +692,40 @@ impl Compiler {
             self.loops.push(loop_context);
             self.compile_statement(body)?;
             let continue_target = self.position();
+            // Copy this iteration's bindings back to the loop frame, then
+            // materialize the next iteration's environment before running the
+            // update expression (ES2022 14.7.4.8: `CreatePerIteration-
+            // Environment` precedes the increment, so closures from the
+            // current iteration keep observing its values).
+            for binding in bindings.values() {
+                let slot = if binding.captured {
+                    binding.slot | crate::bytecode::ENV_SLOT
+                } else {
+                    binding.slot
+                };
+                self.emit(Op::GetVar { depth: 0, slot });
+                self.emit(Op::SetVar { depth: 1, slot });
+            }
+            self.emit(Op::PopEnv);
+            self.local_frames.pop();
+            self.emit(Op::PushEnv(size));
+            let mut next = self.scope_frame();
+            next.bindings = bindings.clone();
+            next.size = size;
+            self.local_frames.push(next);
+            for binding in bindings.values() {
+                let slot = if binding.captured {
+                    binding.slot | crate::bytecode::ENV_SLOT
+                } else {
+                    binding.slot
+                };
+                self.emit(Op::GetVar { depth: 1, slot });
+                self.emit(Op::SetVar { depth: 0, slot });
+            }
             if let Some(update) = update {
                 self.compile_expr(update)?;
                 self.emit(Op::Pop);
             }
-            for slot in bindings.values() {
-                self.emit(Op::GetVar {
-                    depth: 0,
-                    slot: *slot,
-                });
-                self.emit(Op::SetVar {
-                    depth: 1,
-                    slot: *slot,
-                });
-            }
-            self.emit(Op::PopEnv);
-            self.local_frames.pop();
             self.emit(Op::Jump(start as u32));
             let loop_context = self.loops.pop().unwrap();
             let break_context = self.breakables.pop().unwrap();
@@ -722,6 +742,9 @@ impl Compiler {
                 self.patch_jump(jump, continue_target);
             }
             self.emit(Op::PopEnv);
+            // Two runtime frames were popped above (iteration and loop
+            // frame); mirror both in the compile-time scope stack.
+            self.local_frames.pop();
             self.local_frames.pop();
             return Ok(());
         }
@@ -742,15 +765,18 @@ impl Compiler {
         };
         let body_start = self.position();
         let next_plan = self.for_next_plan(test.as_ref(), update.as_ref());
+        let label = self.pending_label.take();
         let break_context = BreakContext {
-            label: None,
+            label: label.clone(),
             env_depth: self.local_frames.len(),
             stack_cleanup: 0,
             try_depth: self.try_depth,
             jumps: Vec::new(),
         };
         let loop_context = LoopContext {
-            label: None,
+            label,
+            exit_cleanup: 0,
+            break_index: self.breakables.len(),
             env_depth: self.local_frames.len(),
             stack_cleanup: 0,
             try_depth: self.try_depth,
@@ -846,7 +872,7 @@ impl Compiler {
                 .first()
                 .map(|declarator| pattern_names(&declarator.pattern))
                 .unwrap_or_default();
-            !body_captures_names(body, &names)
+            !names.iter().any(|name| self.name_is_captured(name))
         } else {
             false
         };
@@ -860,7 +886,7 @@ impl Compiler {
             let ForInit::Var(declaration) = left else {
                 unreachable!();
             };
-            let mut frame = ScopeFrame::new();
+            let mut frame = self.scope_frame();
             if let Some(declarator) = declaration.declarations.first() {
                 for name in pattern_names(&declarator.pattern) {
                     frame.declare(&name);
@@ -891,15 +917,18 @@ impl Compiler {
                 self.compile_assignment_target_store(expression)?;
             }
         }
+        let label = self.pending_label.take();
         let break_context = BreakContext {
-            label: None,
+            label: label.clone(),
             env_depth: outer_depth,
             stack_cleanup: 1,
             try_depth: self.try_depth,
             jumps: Vec::new(),
         };
         let loop_context = LoopContext {
-            label: None,
+            label,
+            exit_cleanup: 1,
+            break_index: self.breakables.len(),
             env_depth: outer_depth,
             stack_cleanup: 0,
             try_depth: self.try_depth,
@@ -937,10 +966,19 @@ impl Compiler {
                 None => true,
             })
             .ok_or_else(|| self.error("break outside of loop or switch"))?;
-        let (env_depth, stack_cleanup, try_depth) = {
+        let (env_depth, own_cleanup, try_depth) = {
             let context = &self.breakables[position];
             (context.env_depth, context.stack_cleanup, context.try_depth)
         };
+        // Loops nested inside the break target may hold iterators on the
+        // operand stack; drop those too.
+        let stack_cleanup: usize = own_cleanup
+            + self
+                .loops
+                .iter()
+                .filter(|context| context.break_index > position)
+                .map(|context| context.exit_cleanup)
+                .sum::<usize>();
         self.emit_finalizers_until(try_depth)?;
         self.emit_cleanup(env_depth, stack_cleanup, try_depth);
         let jump = self.emit_jump(Op::Jump(0));
@@ -957,7 +995,7 @@ impl Compiler {
                 None => true,
             })
             .ok_or_else(|| self.error("continue outside of loop"))?;
-        let (env_depth, stack_cleanup, try_depth, target) = {
+        let (env_depth, own_cleanup, try_depth, target) = {
             let context = &self.loops[position];
             (
                 context.env_depth,
@@ -966,6 +1004,13 @@ impl Compiler {
                 context.continue_target,
             )
         };
+        // Continuing an outer loop exits every inner loop, so their iterators
+        // must leave the operand stack.
+        let stack_cleanup: usize = own_cleanup
+            + self.loops[position + 1..]
+                .iter()
+                .map(|context| context.exit_cleanup)
+                .sum::<usize>();
         self.emit_finalizers_until(try_depth)?;
         self.emit_cleanup(env_depth, stack_cleanup, try_depth);
         if let Some(target) = target {
@@ -1034,7 +1079,7 @@ impl Compiler {
         self.patch_jump(try_start, handler_pc);
 
         if let Some(handler) = handler {
-            let mut frame = ScopeFrame::new();
+            let mut frame = self.scope_frame();
             if let Some(param) = &handler.param {
                 for name in pattern_names(param) {
                     frame.declare(&name);

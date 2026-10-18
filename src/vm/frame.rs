@@ -50,22 +50,12 @@ pub(crate) struct Handler {
     pub(crate) index: usize,
 }
 
-/// Non-capturing functions keep their locals in flat per-frame storage
-/// instead of a heap environment, mirroring the stack slots QuickJS keeps
-/// in `JSStackFrame` (quickjs.c:427).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EventLoop {
-    Env,
-    Locals,
-}
-
 /// Activation record. QuickJS' equivalent is `JSStackFrame` (quickjs.c:427)
 /// with `var_refs`, `sp` and the operand stack in `JS_CallInternal`
 /// (quickjs.c:18051). It is owned so `await` can move it into the job queue.
 pub(crate) struct Frame {
     pub(crate) definition: Rc<FunctionDef>,
     pub(crate) env: Option<EnvRef>,
-    pub(crate) event_loop: EventLoop,
     /// Flat slot storage for non-capturing functions, mirroring
     /// `JSStackFrame.slots`. Each entry is `(offset, size)`.
     pub(crate) local_frames: Vec<(usize, usize)>,
@@ -89,7 +79,6 @@ impl Frame {
         Box::new(Self {
             definition: FunctionDef::empty(),
             env: None,
-            event_loop: EventLoop::Locals,
             local_frames: Vec::new(),
             local_offset: 0,
             local_size: 0,
@@ -104,39 +93,39 @@ impl Frame {
         })
     }
 
-    /// Reset the flat-local or environment storage for a fresh call.
+    /// Reset the flat frame and the optional environment for a fresh call.
+    /// Pooled frames arrive empty (`recycle_frame` clears them), so only the
+    /// root scope has to be materialized.
     pub(crate) fn begin(&mut self, use_env: bool) {
-        self.local_frames.clear();
-        self.locals.clear();
-        self.handlers.clear();
         self.local_offset = 0;
         self.local_size = 0;
+        let size = self.definition.env_size as usize;
+        self.locals.resize(size, JsValue::Undefined);
+        self.local_frames.push((0, size));
+        self.local_size = size;
+        // Leading plain parameters land directly in their slots, like
+        // QuickJS' contiguous argument buffer (quickjs.c:18132). Captured
+        // parameters are read from the environment, so both stores receive
+        // the value; a write later updates only the captured one.
+        let simple = (self.definition.simple_params as usize).min(size);
+        for index in 0..simple {
+            if let Some(value) = self.arguments.get(index) {
+                self.locals[index] = value.clone();
+            }
+        }
+        if self.definition.is_class_fields {
+            for slot in 0..size {
+                self.locals[slot] = crate::object::Object::from_value(&self.this)
+                    .map(|object| object.get(&slot.to_string()))
+                    .unwrap_or(JsValue::Undefined);
+            }
+        }
         if !use_env {
-            let size = self.definition.env_size as usize;
-            self.locals.clear();
-            self.locals.resize(size, JsValue::Undefined);
-            self.local_frames.push((0, size));
-            self.local_size = size;
-            // Leading plain parameters land directly in their slots, like
-            // QuickJS' contiguous `arg_buf` (quickjs.c:18132).
-            let simple = (self.definition.simple_params as usize).min(size);
-            for index in 0..simple {
-                if let Some(value) = self.arguments.get(index) {
-                    self.locals[index] = value.clone();
-                }
-            }
-            if self.definition.is_class_fields {
-                for slot in 0..size {
-                    self.locals[slot] = crate::object::Object::from_value(&self.this)
-                        .map(|object| object.get(&slot.to_string()))
-                        .unwrap_or(JsValue::Undefined);
-                }
-            }
             return;
         }
         if let Some(env) = &self.env {
-            let simple = (self.definition.simple_params as usize).min(env.slots.borrow().len());
-            for index in 0..simple {
+            let slots = env.slots.borrow().len();
+            for index in 0..simple.min(slots) {
                 if let Some(value) = self.arguments.get(index) {
                     env.slots.borrow_mut()[index] = value.clone();
                 }
@@ -184,44 +173,55 @@ impl Frame {
 
     #[inline(always)]
     pub(crate) fn get_var(&self, depth: u16, slot: u16) -> JsValue {
-        if self.event_loop == EventLoop::Locals && depth == 0 {
+        if slot & crate::bytecode::ENV_SLOT != 0 {
+            let slot = (slot & !crate::bytecode::ENV_SLOT) as usize;
+            let value = self
+                .env
+                .as_ref()
+                .map(|env| env.get(depth as usize, slot))
+                .unwrap_or(JsValue::Undefined);
+
+            return value;
+        }
+        if depth == 0 {
             let slot = slot as usize;
             if slot < self.local_size
                 && let Some(value) = self.locals.get(self.local_offset + slot)
             {
                 return value.clone();
             }
+
             return JsValue::Undefined;
         }
-        match self.event_loop {
-            EventLoop::Env => self
-                .env
-                .as_ref()
-                .map(|env| env.get(depth as usize, slot as usize))
-                .unwrap_or(JsValue::Undefined),
-            EventLoop::Locals => {
-                let count = self.local_frames.len();
-                let depth = depth as usize;
-                if depth >= count {
-                    return JsValue::Undefined;
-                }
-                let (offset, size) = self.local_frames[count - 1 - depth];
-                let slot = slot as usize;
-                if slot >= size {
-                    return JsValue::Undefined;
-                }
-                self.locals
-                    .get(offset + slot)
-                    .cloned()
-                    .unwrap_or(JsValue::Undefined)
-            }
+        let count = self.local_frames.len();
+        let depth = depth as usize;
+        if depth >= count {
+            return JsValue::Undefined;
         }
+        let (offset, size) = self.local_frames[count - 1 - depth];
+        let slot = slot as usize;
+        if slot >= size {
+            return JsValue::Undefined;
+        }
+        self.locals
+            .get(offset + slot)
+            .cloned()
+            .unwrap_or(JsValue::Undefined)
     }
 
     #[inline(always)]
     pub(crate) fn set_var(&mut self, depth: u16, slot: u16, value: JsValue) {
-        if self.event_loop == EventLoop::Locals && depth == 0 {
+        if slot & crate::bytecode::ENV_SLOT != 0 {
+            let slot = (slot & !crate::bytecode::ENV_SLOT) as usize;
+
+            if let Some(env) = &self.env {
+                env.set(depth as usize, slot, value);
+            }
+            return;
+        }
+        if depth == 0 {
             let slot = slot as usize;
+
             if slot < self.local_size
                 && let Some(target) = self.locals.get_mut(self.local_offset + slot)
             {
@@ -229,31 +229,16 @@ impl Frame {
             }
             return;
         }
-        match self.event_loop {
-            EventLoop::Env => {
-                if let Some(env) = &self.env {
-                    env.set(depth as usize, slot as usize, value);
-                }
-            }
-            EventLoop::Locals => {
-                let count = self.local_frames.len();
-                let depth = depth as usize;
-                if depth < count {
-                    let (offset, size) = self.local_frames[count - 1 - depth];
-                    let slot = slot as usize;
-                    if slot < size
-                        && let Some(target) = self.locals.get_mut(offset + slot)
-                    {
-                        *target = value;
-                    }
-                }
+        let count = self.local_frames.len();
+        let depth = depth as usize;
+        if depth < count {
+            let (offset, size) = self.local_frames[count - 1 - depth];
+            let slot = slot as usize;
+            if slot < size
+                && let Some(target) = self.locals.get_mut(offset + slot)
+            {
+                *target = value;
             }
         }
-    }
-
-    pub(crate) fn env(&self) -> &EnvRef {
-        self.env
-            .as_ref()
-            .expect("capturing function must have an environment")
     }
 }

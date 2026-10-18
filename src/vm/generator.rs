@@ -149,11 +149,7 @@ fn start_frame(
     arguments: Vec<JsValue>,
 ) -> JsResult<Box<Frame>> {
     let use_env = definition.use_env;
-    let event_loop = if use_env {
-        super::frame::EventLoop::Env
-    } else {
-        super::frame::EventLoop::Locals
-    };
+
     let mut frame = super::take_frame(realm).unwrap_or_else(Frame::new);
     frame.definition = definition.clone();
     frame.env = if use_env {
@@ -162,7 +158,6 @@ fn start_frame(
     } else {
         None
     };
-    frame.event_loop = event_loop;
     // Generator functions use ordinary `this` semantics fixed at creation.
     frame.this = receiver;
     frame.callee = None;

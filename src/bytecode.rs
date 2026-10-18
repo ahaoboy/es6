@@ -39,6 +39,10 @@ pub struct ClassMethod {
 /// Compiled function body. QuickJS stores the same information in
 /// `JSFunctionBytecode` (quickjs.c:855) with `byte_code_buf`, `cpool` and
 /// `closure_var`.
+/// High bit of a bytecode slot operand: the binding lives in the
+/// environment chain instead of the flat frame (QuickJS compiles separate
+/// OP_get_var_ref/OP_get_loc opcodes for the same distinction).
+pub const ENV_SLOT: u16 = 0x8000;
 pub struct FunctionDef {
     pub name: Rc<str>,
     pub code: Vec<Op>,

@@ -358,7 +358,12 @@ impl<'a> Parser<'a> {
             self.expect_punct(Punct::LParen)?;
             let test = self.parse_expression()?;
             self.expect_punct(Punct::RParen)?;
-            self.consume_semicolon()?;
+            // The trailing semicolon of `do ... while (...)` is optional:
+            // automatic semicolon insertion applies even without a line
+            // terminator before the next statement.
+            if self.current.is_punct(Punct::Semicolon) {
+                self.advance()?;
+            }
             return Ok(Stmt {
                 kind: StmtKind::DoWhile { body, test },
                 span,

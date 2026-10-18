@@ -134,15 +134,9 @@ pub(crate) fn run_frame(
     completion: Option<ObjRef>,
 ) -> JsResult<RunOutcome> {
     let use_env = definition.use_env;
-    let event_loop = if use_env {
-        frame::EventLoop::Env
-    } else {
-        frame::EventLoop::Locals
-    };
     let mut frame = take_frame(realm).unwrap_or_else(Frame::new);
     frame.definition = definition;
     frame.env = if use_env { env } else { None };
-    frame.event_loop = event_loop;
     frame.this = this;
     frame.callee = callee;
     frame.arguments = arguments;
