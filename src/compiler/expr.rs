@@ -234,10 +234,10 @@ impl Compiler {
                 arguments,
                 optional,
             } => {
-                self.compile_call(callee, arguments, false, *optional)?;
+                self.compile_call(callee, arguments, false, *optional, false)?;
             }
             ExprKind::New { callee, arguments } => {
-                self.compile_call(callee, arguments, true, false)?;
+                self.compile_call(callee, arguments, true, false, false)?;
             }
             ExprKind::Template {
                 quasis,
@@ -658,6 +658,7 @@ impl Compiler {
         arguments: &[Argument],
         is_new: bool,
         optional: bool,
+        discard: bool,
     ) -> Result<(), ParseError> {
         let has_spread = arguments
             .iter()
@@ -680,6 +681,9 @@ impl Compiler {
         {
             self.compile_arguments(arguments)?;
             self.emit(Op::SuperCall(arguments.len() as u16));
+            if discard {
+                self.emit(Op::Pop);
+            }
             return Ok(());
         }
         if !is_new
@@ -710,6 +714,9 @@ impl Compiler {
                         }
                     }
                     self.emit(Op::CallSuperMethod(arguments.len() as u16));
+                    if discard {
+                        self.emit(Op::Pop);
+                    }
                 }
                 return Ok(());
             }
@@ -733,13 +740,23 @@ impl Compiler {
                             }
                             let key = self.string_constant(name);
                             let cache = self.add_prop_cache();
-                            self.emit(Op::CallVarMethodConst {
-                                depth: reference.depth,
-                                slot: reference.slot,
-                                key,
-                                cache,
-                                argc: arguments.len() as u16,
-                            });
+                            if discard {
+                                self.emit(Op::CallVarMethodConstDiscard {
+                                    depth: reference.depth,
+                                    slot: reference.slot,
+                                    key,
+                                    cache,
+                                    argc: arguments.len() as u16,
+                                });
+                            } else {
+                                self.emit(Op::CallVarMethodConst {
+                                    depth: reference.depth,
+                                    slot: reference.slot,
+                                    key,
+                                    cache,
+                                    argc: arguments.len() as u16,
+                                });
+                            }
                             return Ok(());
                         }
                     }
@@ -751,11 +768,19 @@ impl Compiler {
                         }
                         let key = self.string_constant(name);
                         let cache = self.add_prop_cache();
-                        self.emit(Op::CallThisMethodConst {
-                            key,
-                            cache,
-                            argc: arguments.len() as u16,
-                        });
+                        if discard {
+                            self.emit(Op::CallThisMethodConstDiscard {
+                                key,
+                                cache,
+                                argc: arguments.len() as u16,
+                            });
+                        } else {
+                            self.emit(Op::CallThisMethodConst {
+                                key,
+                                cache,
+                                argc: arguments.len() as u16,
+                            });
+                        }
                         return Ok(());
                     }
                     _ => {}
@@ -775,13 +800,20 @@ impl Compiler {
             if has_spread {
                 self.compile_arguments_array(arguments)?;
                 self.emit(Op::CallMethodSpread);
+                if discard {
+                    self.emit(Op::Pop);
+                }
             } else {
                 for argument in arguments {
                     if let Argument::Expr(expression) = argument {
                         self.compile_expr(expression)?;
                     }
                 }
-                self.emit(Op::CallMethod(arguments.len() as u16));
+                self.emit(if discard {
+                    Op::CallMethodDiscard(arguments.len() as u16)
+                } else {
+                    Op::CallMethod(arguments.len() as u16)
+                });
             }
             return Ok(());
         }
@@ -793,6 +825,9 @@ impl Compiler {
             } else {
                 Op::CallSpread
             });
+            if discard {
+                self.emit(Op::Pop);
+            }
         } else {
             for argument in arguments {
                 if let Argument::Expr(expression) = argument {
@@ -801,6 +836,8 @@ impl Compiler {
             }
             self.emit(if is_new {
                 Op::New(arguments.len() as u16)
+            } else if discard {
+                Op::CallDiscard(arguments.len() as u16)
             } else {
                 Op::Call(arguments.len() as u16)
             });
@@ -1345,6 +1382,29 @@ impl Compiler {
                 });
                 Ok(true)
             }
+            ExprKind::Call {
+                callee,
+                arguments,
+                optional,
+            } => {
+                // Only unconditional calls can discard their result inside
+                // the call opcode; optional chains keep their value on the
+                // short-circuit path.
+                if *optional || callee_has_optional(callee) {
+                    return Ok(false);
+                }
+                self.compile_call(callee, arguments, false, false, true)?;
+                Ok(true)
+            }
+            ExprKind::Sequence(expressions) => {
+                for expression in expressions {
+                    if !self.compile_discard_expr(expression)? {
+                        self.compile_expr(expression)?;
+                        self.emit(Op::Pop);
+                    }
+                }
+                Ok(true)
+            }
             _ => Ok(false),
         }
     }
@@ -1371,5 +1431,23 @@ impl Compiler {
             let name = self.string_constant(name);
             self.emit(Op::SetGlobal(name));
         }
+    }
+}
+
+/// Whether a callee expression contains an optional-chain link. Such calls
+/// leave `undefined` on the short-circuit path, so they cannot use the
+/// result-dropping call opcodes.
+fn callee_has_optional(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Member {
+            object,
+            property,
+            optional,
+        } => {
+            *optional
+                || callee_has_optional(object)
+                || matches!(property, MemberProperty::Computed(inner) if callee_has_optional(inner))
+        }
+        _ => false,
     }
 }

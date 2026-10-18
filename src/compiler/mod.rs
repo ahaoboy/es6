@@ -247,43 +247,6 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) {
-        // A `Pop` directly after a call is a call in statement position:
-        // drop the result inside the call instead of pushing and popping it.
-        if matches!(op, Op::Pop)
-            && let Some(last) = self.code.last_mut()
-        {
-            match *last {
-                Op::Call(argc) => {
-                    *last = Op::CallDiscard(argc);
-                    return;
-                }
-                Op::CallMethod(argc) => {
-                    *last = Op::CallMethodDiscard(argc);
-                    return;
-                }
-                Op::CallVarMethodConst {
-                    depth,
-                    slot,
-                    key,
-                    cache,
-                    argc,
-                } => {
-                    *last = Op::CallVarMethodConstDiscard {
-                        depth,
-                        slot,
-                        key,
-                        cache,
-                        argc,
-                    };
-                    return;
-                }
-                Op::CallThisMethodConst { key, cache, argc } => {
-                    *last = Op::CallThisMethodConstDiscard { key, cache, argc };
-                    return;
-                }
-                _ => {}
-            }
-        }
         self.code.push(op);
         self.positions.push(self.span.start as u32);
     }

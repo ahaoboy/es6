@@ -1271,6 +1271,7 @@ pub(crate) fn execute_op(
                 return Err(realm.type_error("Missing iterator"));
             }
             let iterator = frame.stack[length - 1].clone();
+
             let next = super::iter::advance_iterator(realm, &iterator)?;
             match next {
                 Some(value) => frame.stack.push(value),
