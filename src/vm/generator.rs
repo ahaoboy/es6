@@ -160,6 +160,7 @@ fn start_frame(
     };
     // Generator functions use ordinary `this` semantics fixed at creation.
     frame.this = receiver;
+    frame.global_this = false;
     frame.callee = None;
     frame.arguments = arguments.into_iter().collect();
     frame.pc = 0;
@@ -173,13 +174,9 @@ fn start_frame(
 fn finish_generator(
     realm: &mut Realm,
     object: &crate::object::ObjRef,
-    outcome: (JsResult<RunOutcome>, Option<Box<Frame>>),
+    result: JsResult<RunOutcome>,
 ) -> JsResult<JsValue> {
-    let (result, frame) = outcome;
-    // Recycle the frame for pooled reuse on every non-yield completion.
-    if let Some(frame) = frame {
-        super::recycle_frame(realm, frame);
-    }
+    // un_loop recycles the frame on every non-yield completion.
     match result {
         Ok(RunOutcome::Return(value)) => {
             set_generator_state(object, GeneratorState::Completed);

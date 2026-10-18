@@ -92,25 +92,41 @@ Additional hot-path work:
   `local.method(args)` / `this.method(args)` calls, fused parameter binding,
   and declared-function calls skip the per-call self-name binding.
 - `for (let ...)` and `for (const ... of ...)` bindings are only materialized
-  per iteration when a nested function can observe them (a static
-  over-approximation of QuickJS' `JSVarDef.is_captured` resolution), so the
-  common loop compiles to the same fused shape as a `var` loop.
+  per iteration when a nested function can observe them, so the common loop
+  compiles to the same fused shape as a `var` loop.
+- Capture is tracked per binding, like QuickJS' `JSVarDef.is_captured`: a
+  function that contains a closure keeps uncaptured locals in flat frame
+  slots and stores only captured bindings in its environment. Bytecode slot
+  operands carry an environment bit, so the existing fused instructions work
+  for both storage classes without extra dispatch.
+- Objects use a shared, interned shape (`Rc<Shape>` with a slot-aligned
+  `Vec<Property>`), the counterpart of QuickJS' `JSShape` and its transition
+  table. Creating a literal or a constructor-built object copies a shape
+  pointer and a property vector instead of rebuilding a hash map, and
+  property inline caches validate the shape id before reading the cached
+  slot directly.
 - Property inline caches carry the per-site canonical key and a prepared
-  object-literal property map, so repeated literal evaluation does not
-  re-hash or re-parse keys; `.prototype` is created lazily and function
-  names reuse a per-bytecode atom.
+  object-literal layout, so repeated literal evaluation does not re-hash or
+  re-parse keys; `.prototype` is created lazily and function names reuse a
+  per-bytecode atom.
+- The call path avoids redundant reference traffic: the common bytecode
+  call does not clone the `JsFunction` handle, the callee's `this` is
+  resolved lazily (sloppy calls that never read it skip the global object),
+  the argument vector is inline for up to four arguments, and a call in
+  statement position drops its result inside the call (`CallDiscard`)
+  instead of pushing and popping it. `run_loop` recycles its frame directly
+  on every non-suspending exit.
 - `Map`/`Set` are insertion-ordered hash tables with SameValueZero keys
   (linear scanning was quadratic before), and primitive string receivers no
   longer allocate a temporary wrapper object per property access.
 
 Measured with the micro-kernels in this repository against qjs-ng on the
-same machine: integer loops are ~1.2x QuickJS, fused property access ~2x,
-`Map`/`Set` and exception handling are faster than QuickJS, and regexp
-execution is at parity. The remaining gap is concentrated in capturing
-closures: today every local of a capturing function lives in its
-environment frame, while QuickJS boxes only captured variables
-(`JSVarDef.is_captured`); per-variable capture tracking is the next step for
-full parity.
+same machine (pinned to one core): integer loops are ~1.3x QuickJS, fused
+property access ~1.8x, object allocation ~1.7x, a one-argument call ~3.2x,
+and `Map`/`Set` and exception handling are faster than QuickJS; regexp
+execution is at parity. The remaining gap is dominated by the opcode
+dispatch loop rather than by frame allocation or property layout: recursive
+call micro-benchmarks spend most of their time in per-opcode dispatch.
 
 Deep recursion is bounded by `Context::set_max_call_depth` (a `RangeError`
 like QuickJS' stack limit); the CLI runs the engine on a 64 MB stack.

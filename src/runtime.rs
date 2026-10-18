@@ -170,6 +170,9 @@ pub struct Realm {
     /// the equivalent bound in `rt->stack_limit`.
     pub(crate) call_depth: usize,
     pub(crate) max_call_depth: usize,
+    /// Whether call-stack names are collected for error traces. Resolved once
+    /// so the call path reads a plain field instead of an atomic.
+    pub(crate) trace_stack: bool,
 }
 
 impl Realm {
@@ -260,6 +263,7 @@ impl Realm {
             module_cache: std::collections::HashMap::new(),
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            trace_stack: crate::vm::error::stack_trace_enabled(),
         };
         builtins::install(&mut realm);
         realm

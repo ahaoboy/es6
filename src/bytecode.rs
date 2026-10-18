@@ -182,7 +182,19 @@ pub enum Op {
         cache: u32,
         argc: u16,
     },
+    CallVarMethodConstDiscard {
+        depth: u16,
+        slot: u16,
+        key: u32,
+        cache: u32,
+        argc: u16,
+    },
     CallThisMethodConst {
+        key: u32,
+        cache: u32,
+        argc: u16,
+    },
+    CallThisMethodConstDiscard {
         key: u32,
         cache: u32,
         argc: u16,
@@ -263,7 +275,10 @@ pub enum Op {
     ObjectRest(u32),
 
     Call(u16),
+    /// Call in statement position: the result is dropped instead of pushed.
+    CallDiscard(u16),
     CallMethod(u16),
+    CallMethodDiscard(u16),
     CallSpread,
     CallMethodSpread,
     CallSuperMethod(u16),

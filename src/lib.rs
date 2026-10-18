@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 //! A small, self-contained ECMAScript engine written in Rust.
 //!

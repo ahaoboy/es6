@@ -43,7 +43,7 @@ pub(crate) fn execute_op(
         Op::Null => frame.stack.push(JsValue::Null),
         Op::True => frame.stack.push(JsValue::Bool(true)),
         Op::False => frame.stack.push(JsValue::Bool(false)),
-        Op::This => frame.stack.push(frame.this.clone()),
+        Op::This => frame.stack.push(frame.this_value(realm)),
         Op::Callee => frame
             .stack
             .push(frame.callee.clone().unwrap_or(JsValue::Undefined)),
@@ -109,7 +109,7 @@ pub(crate) fn execute_op(
             frame.stack.push(value);
         }
         Op::GetThisPropConst { key, cache } => {
-            let object = frame.this.clone();
+            let object = frame.this_value(realm);
             let value = match frame.definition.prop_caches.get(cache as usize) {
                 Some(prop_cache) => super::property::cached_get_const(
                     realm,
@@ -147,7 +147,7 @@ pub(crate) fn execute_op(
         }
         Op::SetThisPropConstKeep { key, cache } => {
             let value = pop(&mut frame.stack)?;
-            let object = frame.this.clone();
+            let object = frame.this_value(realm);
             match frame.definition.prop_caches.get(cache as usize) {
                 Some(prop_cache) => super::property::cached_set_const(
                     realm,
@@ -185,9 +185,30 @@ pub(crate) fn execute_op(
             let value = call_value_owned(realm, function, object, arguments)?;
             frame.stack.push(value);
         }
+        Op::CallVarMethodConstDiscard {
+            depth,
+            slot,
+            key,
+            cache,
+            argc,
+        } => {
+            let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
+            let object = frame.get_var(depth, slot);
+            let function = match frame.definition.prop_caches.get(cache as usize) {
+                Some(prop_cache) => super::property::cached_get_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    prop_cache,
+                )?,
+                None => get_value_property(realm, &object, &PropKey::from(""))?,
+            };
+            let _ = call_value_owned(realm, function, object, arguments)?;
+        }
         Op::CallThisMethodConst { key, cache, argc } => {
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
-            let object = frame.this.clone();
+            let object = frame.this_value(realm);
             let function = match frame.definition.prop_caches.get(cache as usize) {
                 Some(prop_cache) => super::property::cached_get_const(
                     realm,
@@ -200,6 +221,21 @@ pub(crate) fn execute_op(
             };
             let value = call_value_owned(realm, function, object, arguments)?;
             frame.stack.push(value);
+        }
+        Op::CallThisMethodConstDiscard { key, cache, argc } => {
+            let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
+            let object = frame.this_value(realm);
+            let function = match frame.definition.prop_caches.get(cache as usize) {
+                Some(prop_cache) => super::property::cached_get_const(
+                    realm,
+                    &object,
+                    &frame.definition,
+                    key,
+                    prop_cache,
+                )?,
+                None => get_value_property(realm, &object, &PropKey::from(""))?,
+            };
+            let _ = call_value_owned(realm, function, object, arguments)?;
         }
         Op::Arguments => {
             frame
@@ -488,12 +524,23 @@ pub(crate) fn execute_op(
             let value = call_value_owned(realm, function, JsValue::Undefined, arguments)?;
             frame.stack.push(value);
         }
+        Op::CallDiscard(argc) => {
+            let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
+            let function = pop(&mut frame.stack)?;
+            let _ = call_value_owned(realm, function, JsValue::Undefined, arguments)?;
+        }
         Op::CallMethod(argc) => {
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let function = pop(&mut frame.stack)?;
             let this = pop(&mut frame.stack)?;
             let value = call_value_owned(realm, function, this, arguments)?;
             frame.stack.push(value);
+        }
+        Op::CallMethodDiscard(argc) => {
+            let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
+            let function = pop(&mut frame.stack)?;
+            let this = pop(&mut frame.stack)?;
+            let _ = call_value_owned(realm, function, this, arguments)?;
         }
         Op::CallSpread => {
             let arguments = pop_array(&mut frame.stack)?;
@@ -512,14 +559,14 @@ pub(crate) fn execute_op(
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let key = pop_property_key(realm, &mut frame.stack)?;
             let function = super_function(realm, frame, &key)?;
-            let value = call_value_owned(realm, function, frame.this.clone(), arguments)?;
+            let value = call_value_owned(realm, function, frame.this_value(realm), arguments)?;
             frame.stack.push(value);
         }
         Op::CallSuperMethodSpread => {
             let arguments = pop_array(&mut frame.stack)?;
             let key = pop_property_key(realm, &mut frame.stack)?;
             let function = super_function(realm, frame, &key)?;
-            let value = call_value(realm, function, frame.this.clone(), &arguments)?;
+            let value = call_value(realm, function, frame.this_value(realm), &arguments)?;
             frame.stack.push(value);
         }
         Op::SuperGetProp => {
@@ -1089,7 +1136,13 @@ pub(crate) fn execute_op(
             // one of them captures its bindings; otherwise an empty root
             // environment stands in (QuickJS passes `var_refs` the same way).
             let env = frame.env.clone().unwrap_or_else(|| Env::new(0, None));
-            let value = closure_value(realm, &frame.definition, index, &env, frame.this.clone())?;
+            let value = closure_value(
+                realm,
+                &frame.definition,
+                index,
+                &env,
+                frame.this_value(realm),
+            )?;
             frame.stack.push(value);
         }
         Op::TryStart(catch_pc) => {
@@ -1244,13 +1297,14 @@ pub(crate) fn execute_op(
                     .as_object()
                     .and_then(|object| object.to_ref().borrow().function())
                     .is_some_and(|function| function.has_super);
+                let receiver = frame.this_value(realm);
                 if !parent_is_derived {
-                    super::call::run_instance_initializer(realm, &parent, &frame.this)?;
+                    super::call::run_instance_initializer(realm, &parent, &receiver)?;
                 }
-                call_value(realm, parent.clone(), frame.this.clone(), &arguments)?;
+                call_value(realm, parent.clone(), receiver.clone(), &arguments)?;
                 // Fields declared by this class initialize after `super()`.
-                super::call::run_instance_initializer(realm, &callee, &frame.this)?;
-                frame.stack.push(frame.this.clone());
+                super::call::run_instance_initializer(realm, &callee, &receiver)?;
+                frame.stack.push(receiver);
             }
         }
     }
@@ -1380,6 +1434,7 @@ fn compare_op(
     Ok(())
 }
 
+#[inline(always)]
 pub(crate) fn pop(stack: &mut ValueStack) -> JsResult<JsValue> {
     stack
         .pop()
@@ -1392,12 +1447,20 @@ pub(crate) fn peek(stack: &[JsValue]) -> JsResult<&JsValue> {
         .ok_or_else(|| JsValue::string("InternalError: stack underflow"))
 }
 
+#[inline(always)]
 fn pop_arguments(stack: &mut ValueStack, count: usize) -> JsResult<ArgumentStack> {
-    if stack.len() < count {
+    let len = stack.len();
+    if len < count {
         return Err(JsValue::string("InternalError: stack underflow"));
     }
-    let start = stack.len() - count;
-    let values = stack.drain(start..).collect();
+    if count == 0 {
+        return Ok(ArgumentStack::new());
+    }
+    let mut values = ArgumentStack::with_capacity(count);
+    for _ in 0..count {
+        values.push(stack.pop().unwrap_or(JsValue::Undefined));
+    }
+    values.reverse();
     Ok(values)
 }
 

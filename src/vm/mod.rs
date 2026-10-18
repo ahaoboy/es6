@@ -6,7 +6,7 @@
 //! `JS_CallInternal` (quickjs.c:18051).
 
 mod call;
-mod error;
+pub(crate) mod error;
 mod frame;
 pub(crate) mod generator;
 mod iter;
@@ -40,7 +40,7 @@ pub use crate::coerce::{
 /// `push`/`pop` pairs never touch the heap (the QuickJS equivalent lives in
 /// the `JS_CallInternal` alloca, quickjs.c:18051).
 pub(crate) type ValueStack = SmallVec<[JsValue; 32]>;
-pub(crate) type ArgumentStack = SmallVec<[JsValue; 8]>;
+pub(crate) type ArgumentStack = SmallVec<[JsValue; 4]>;
 
 /// A queued job. QuickJS stores the same entries in `JSContext.job_list` and
 /// dispatches them in `JS_ExecutePendingJob` (quickjs.c:2525).
@@ -114,6 +114,7 @@ pub fn execute(
         definition,
         Some(env),
         this,
+        false,
         None,
         ArgumentStack::new(),
         None,
@@ -124,11 +125,13 @@ pub fn execute(
 }
 
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_frame(
     realm: &mut Realm,
     definition: Rc<FunctionDef>,
     env: Option<EnvRef>,
     this: JsValue,
+    global_this: bool,
     callee: Option<JsValue>,
     arguments: ArgumentStack,
     completion: Option<ObjRef>,
@@ -138,29 +141,28 @@ pub(crate) fn run_frame(
     frame.definition = definition;
     frame.env = if use_env { env } else { None };
     frame.this = this;
+    frame.global_this = global_this;
     frame.callee = callee;
     frame.arguments = arguments;
     frame.pc = 0;
     frame.completion = completion;
     frame.begin(use_env);
-    let (result, frame) = run_loop(realm, frame);
-    if let Some(frame) = frame {
-        recycle_frame(realm, frame);
-    }
-    // A suspended yield carries its own frame out to the generator.
-    result
+    // A suspended yield carries its own frame out inside RunOutcome;
+    // every other exit recycles it before returning.
+    run_loop(realm, frame)
 }
 
 /// Interpreter loop: fetch, dispatch, handle suspension and exceptions. The
 /// counterpart of the opcode switch in `JS_CallInternal` (quickjs.c:18051).
-fn run_loop(
-    realm: &mut Realm,
-    mut frame: Box<Frame>,
-) -> (JsResult<RunOutcome>, Option<Box<Frame>>) {
-    // Keep the bytecode slice in a local: it is stable for the whole call and
-    // avoids reloading `frame.definition` + the `Vec` pointer per opcode.
-    let definition = frame.definition.clone();
-    let code = definition.code.as_slice();
+#[allow(unsafe_code)]
+fn run_loop(realm: &mut Realm, mut frame: Box<Frame>) -> JsResult<RunOutcome> {
+    // The frame owns the definition for the whole run and no opcode replaces
+    // it, so the bytecode buffer stays valid. Taking a raw slice avoids an
+    // `Rc` increment/decrement on every call.
+    let code = unsafe {
+        let definition = Rc::as_ptr(&frame.definition);
+        std::slice::from_raw_parts((*definition).code.as_ptr(), (*definition).code.len())
+    };
     // Program counter kept in a register; synchronized with `frame.pc` when
     // an opcode suspends, unwinds or returns.
     let mut pc = frame.pc;
@@ -177,7 +179,8 @@ fn run_loop(
         }
         if pc >= code.len() {
             frame.pc = pc;
-            return (Ok(RunOutcome::Return(JsValue::Undefined)), Some(frame));
+            recycle_frame(realm, frame);
+            return Ok(RunOutcome::Return(JsValue::Undefined));
         }
         let op = code[pc];
         pc += 1;
@@ -187,7 +190,8 @@ fn run_loop(
             Ok(Step::Return) => {
                 frame.pc = pc;
                 let value = frame.stack.pop().unwrap_or(JsValue::Undefined);
-                return (Ok(RunOutcome::Return(value)), Some(frame));
+                recycle_frame(realm, frame);
+                return Ok(RunOutcome::Return(value));
             }
             Ok(Step::Await) => {
                 frame.pc = pc;
@@ -198,16 +202,17 @@ fn run_loop(
                             frame.stack.push(value);
                             continue;
                         }
-                        Err(error) => return (Err(error), Some(frame)),
+                        Err(error) => {
+                            recycle_frame(realm, frame);
+                            return Err(error);
+                        }
                     }
                 };
                 // The frame moves into the async-frame object owned by the
                 // promise reaction data, mirroring `JSStackFrame.cur_gc_obj`
                 // (quickjs.c:442).
-                if let Err(error) = crate::promise::await_value(realm, value, frame, completion) {
-                    return (Err(error), None);
-                }
-                return (Ok(RunOutcome::Suspended), None);
+                crate::promise::await_value(realm, value, frame, completion)?;
+                return Ok(RunOutcome::Suspended);
             }
             Ok(Step::Yield) => {
                 // Generator suspension: the whole frame moves into the
@@ -215,8 +220,7 @@ fn run_loop(
                 // stashing `cur_sp`/`cur_pc` in the generator (quickjs.c:20871).
                 frame.pc = pc;
                 let value = frame.stack.pop().unwrap_or(JsValue::Undefined);
-                let value = RunOutcome::Yield { frame, value };
-                return (Ok(value), None);
+                return Ok(RunOutcome::Yield { frame, value });
             }
             Err(exception) => {
                 frame.pc = pc;
@@ -229,7 +233,8 @@ fn run_loop(
                             }
                         });
                     }
-                    return (Err(exception), Some(frame));
+                    recycle_frame(realm, frame);
+                    return Err(exception);
                 }
                 pc = frame.pc;
             }
@@ -423,10 +428,7 @@ pub(crate) fn run_job(realm: &mut Realm, job: Job) -> JsResult<()> {
                     }
                 }
             }
-            let (result, frame) = run_loop(realm, frame);
-            if let Some(frame) = frame {
-                recycle_frame(realm, frame);
-            }
+            let result = run_loop(realm, frame);
             match result {
                 Ok(RunOutcome::Return(value)) => {
                     crate::promise::resolve(realm, &completion, value)?;

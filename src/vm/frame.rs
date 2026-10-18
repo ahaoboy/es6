@@ -66,6 +66,10 @@ pub(crate) struct Frame {
     pub(crate) local_size: usize,
     pub(crate) locals: Vec<JsValue>,
     pub(crate) this: JsValue,
+    /// A sloppy call with an undefined/null receiver: this resolves to the
+    /// global object lazily, so callees that never read it skip the Rc
+    /// traffic entirely.
+    pub(crate) global_this: bool,
     pub(crate) callee: Option<JsValue>,
     pub(crate) stack: ValueStack,
     pub(crate) arguments: ArgumentStack,
@@ -84,6 +88,7 @@ impl Frame {
             local_size: 0,
             locals: Vec::new(),
             this: JsValue::Undefined,
+            global_this: false,
             callee: None,
             stack: ValueStack::new(),
             arguments: ArgumentStack::new(),
@@ -151,8 +156,20 @@ impl Frame {
         // `definition` is overwritten before the frame runs again; leaving
         // the Rc in place avoids a thread-local lookup per call.
         self.this = JsValue::Undefined;
+        self.global_this = false;
         self.callee = None;
         self.completion = None;
+    }
+
+    /// Effective receiver: substitutes the global object for sloppy calls
+    /// that were invoked without one.
+    #[inline(always)]
+    pub(crate) fn this_value(&self, realm: &crate::runtime::Realm) -> JsValue {
+        if self.global_this {
+            JsValue::Object(realm.global.clone())
+        } else {
+            self.this.clone()
+        }
     }
 
     /// Truncate the scope stack back to a saved depth (exception unwind).

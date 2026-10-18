@@ -33,61 +33,78 @@ pub(crate) fn call_value_owned(
     this: JsValue,
     arguments: ArgumentStack,
 ) -> JsResult<JsValue> {
-    let function = match &callee {
-        JsValue::Object(object) => match &object.borrow().kind {
-            ObjectKind::Function(function) => Some(function.clone()),
-            _ => None,
-        },
-        _ => None,
-    };
-    let Some(function) = function else {
-        return Err(realm.type_error("Value is not a function"));
-    };
-    if let Some(bound) = &function.bound {
-        let mut combined: ArgumentStack = bound.arguments.iter().cloned().collect();
-        combined.extend(arguments);
-        return call_value_owned(realm, bound.target.clone(), bound.this.clone(), combined);
-    }
-    if let Some(native) = function.native.clone() {
-        return native(realm, &this, &arguments);
-    }
-    if let Some(data_fn) = function.native_data.clone() {
-        let data = function.data.borrow().clone();
-        return data_fn(realm, &this, &arguments, &data);
-    }
-    let definition = function
-        .def
-        .clone()
-        .ok_or_else(|| realm.type_error("Invalid function"))?;
-    if definition.is_generator {
-        // Calling a generator function creates a generator object without
-        // running the body (ES2022 15.5.1.1), like QuickJS' generator call
-        // path (quickjs.c:20871).
-        let this = if this.is_nullish() && !definition.strict {
-            JsValue::Object(realm.global.clone())
-        } else {
-            this
+    // Probe the callee inside the borrow and copy only the fields of the
+    // selected path. The common bytecode call therefore does not clone the
+    // `JsFunction` handle at all.
+    let (definition, parent_env, lexical_this) = {
+        let data = match &callee {
+            JsValue::Object(object) => object.borrow(),
+            _ => return Err(realm.type_error("Value is not a function")),
         };
-        return Ok(JsValue::Object(realm.generator(
-            function,
-            this,
-            arguments.to_vec(),
-        )));
-    }
+        let ObjectKind::Function(function) = &data.kind else {
+            return Err(realm.type_error("Value is not a function"));
+        };
+        if let Some(bound) = &function.bound {
+            let target = bound.target.clone();
+            let this = bound.this.clone();
+            let mut combined: ArgumentStack = bound.arguments.iter().cloned().collect();
+            combined.extend(arguments);
+            drop(data);
+            return call_value_owned(realm, target, this, combined);
+        }
+        if let Some(native) = &function.native {
+            let native = native.clone();
+            drop(data);
+            return native(realm, &this, &arguments);
+        }
+        if let Some(data_fn) = &function.native_data {
+            let data_fn = data_fn.clone();
+            let function_data = function.data.borrow().clone();
+            drop(data);
+            return data_fn(realm, &this, &arguments, &function_data);
+        }
+        let definition = match &function.def {
+            Some(definition) => definition.clone(),
+            None => return Err(realm.type_error("Invalid function")),
+        };
+        if definition.is_generator {
+            // Calling a generator function creates a generator object without
+            // running the body (ES2022 15.5.1.1), like QuickJS' generator call
+            // path (quickjs.c:20871).
+            let strict = definition.strict;
+            let function = function.clone();
+            drop(data);
+            let this = if this.is_nullish() && !strict {
+                JsValue::Object(realm.global.clone())
+            } else {
+                this
+            };
+            return Ok(JsValue::Object(realm.generator(
+                function,
+                this,
+                arguments.to_vec(),
+            )));
+        }
+        (
+            definition,
+            function.env.clone(),
+            function.lexical_this.clone(),
+        )
+    };
     let env = definition.use_env.then(|| {
-        let parent = function.env.clone().unwrap_or_else(|| Env::new(0, None));
+        let parent = parent_env.unwrap_or_else(|| Env::new(0, None));
         Env::new(definition.env_size as usize, Some(parent))
     });
-    let trace = super::error::stack_trace_enabled();
+    let trace = realm.trace_stack;
     if trace {
         super::error::push_call_stack(definition.name.clone());
     }
-    let this = if definition.is_arrow {
-        function.lexical_this.clone().unwrap_or(JsValue::Undefined)
+    let (this, global_this) = if definition.is_arrow {
+        (lexical_this.unwrap_or(JsValue::Undefined), false)
     } else if this.is_nullish() && !definition.strict {
-        JsValue::Object(realm.global.clone())
+        (JsValue::Undefined, true)
     } else {
-        this
+        (this, false)
     };
     let completion = definition.is_async.then(|| realm.promise());
     if realm.call_depth >= realm.max_call_depth {
@@ -99,6 +116,7 @@ pub(crate) fn call_value_owned(
         definition,
         env,
         this,
+        global_this,
         Some(callee),
         arguments,
         completion.clone(),
@@ -218,7 +236,8 @@ pub(crate) fn super_function(realm: &mut Realm, frame: &Frame, key: &PropKey) ->
     if prototype.is_undefined() {
         return Err(realm.reference_error("super is not available"));
     }
-    get_property_receiver(realm, &prototype, key, &frame.this)
+    let receiver = frame.this_value(realm);
+    get_property_receiver(realm, &prototype, key, &receiver)
 }
 
 /// Resolve a property with a receiver, so getter calls bind to the original
