@@ -21,7 +21,13 @@ pub fn install(realm: &mut Realm) {
         1,
         property_is_enumerable,
     );
-    define_accessor(realm, &prototype, "__proto__", get_proto, Some(set_proto));
+    define_accessor(
+        realm,
+        &prototype,
+        "__proto__",
+        get_proto,
+        Some(Rc::new(set_proto)),
+    );
 
     let constructor = realm.global_get("Object").as_object().unwrap();
     let target = constructor.to_ref();
@@ -346,7 +352,7 @@ fn descriptor_from_object(
             if !get.is_undefined() && !get.is_function() {
                 return Err(realm.type_error("Getter must be a function"));
             }
-            (!get.is_undefined()).then_some(get)
+            (!get.is_undefined()).then_some(Box::new(get))
         } else {
             existing.as_ref().and_then(|property| property.get.clone())
         };
@@ -355,7 +361,7 @@ fn descriptor_from_object(
             if !set.is_undefined() && !set.is_function() {
                 return Err(realm.type_error("Setter must be a function"));
             }
-            (!set.is_undefined()).then_some(set)
+            (!set.is_undefined()).then_some(Box::new(set))
         } else {
             existing.as_ref().and_then(|property| property.set.clone())
         };
@@ -412,8 +418,8 @@ fn get_own_property_descriptor(
                 property.writable,
                 property.enumerable,
                 property.configurable,
-                property.get.clone(),
-                property.set.clone(),
+                property.get.as_deref().cloned(),
+                property.set.as_deref().cloned(),
             ),
             None => (true, true, true, None, None),
         }

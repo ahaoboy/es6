@@ -12,7 +12,7 @@ use crate::runtime::Realm;
 use crate::value::{EnvRef, JsResult, JsValue};
 
 pub type ObjRef = Rc<RefCell<ObjectData>>;
-pub type NativeFn = fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue>;
+pub type NativeFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue>>;
 
 #[derive(Clone, Debug)]
 pub enum PropKey {
@@ -63,7 +63,7 @@ impl PropKey {
         }
     }
 
-    fn canonical(&self) -> PropKey {
+    pub(crate) fn canonical(&self) -> PropKey {
         match self {
             Self::Index(index) => Self::Index(*index),
             Self::Str(value) => key_to_index(value)
@@ -80,8 +80,10 @@ impl PropKey {
 #[derive(Clone)]
 pub struct Property {
     pub value: JsValue,
-    pub get: Option<JsValue>,
-    pub set: Option<JsValue>,
+    /// Accessors are rare, so boxing them keeps the common data property
+    /// compact (QuickJS stores them as separate `JSProperty` variants).
+    pub get: Option<Box<JsValue>>,
+    pub set: Option<Box<JsValue>>,
     pub writable: bool,
     pub enumerable: bool,
     pub configurable: bool,
@@ -124,8 +126,8 @@ impl Property {
     pub fn accessor(get: Option<JsValue>, set: Option<JsValue>) -> Self {
         Self {
             value: JsValue::Undefined,
-            get,
-            set,
+            get: get.map(Box::new),
+            set: set.map(Box::new),
             writable: false,
             enumerable: true,
             configurable: true,
@@ -309,11 +311,15 @@ pub struct BoundFunction {
 }
 
 impl JsFunction {
-    pub fn native(name: &str, length: u32, function: NativeFn) -> Self {
+    pub fn native(
+        name: &str,
+        length: u32,
+        function: impl Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue> + 'static,
+    ) -> Self {
         Self {
             name: Rc::from(name),
             length,
-            native: Some(function),
+            native: Some(Rc::new(function)),
             def: None,
             env: None,
             bound: None,
@@ -353,7 +359,7 @@ pub enum ObjectKind {
     Iterator { items: Vec<JsValue>, index: usize },
     Map(Vec<(JsValue, JsValue)>),
     Set(Vec<JsValue>),
-    Promise(PromiseData),
+    Promise(Box<PromiseData>),
     ArrayBuffer(ArrayBufferData),
     DataView(DataViewData),
     TypedArray(TypedArrayData),
@@ -367,10 +373,21 @@ pub enum PromiseState {
     Rejected,
 }
 
+/// Pending reaction recorded by `then`/`await`. QuickJS keeps the same
+/// triple in `JSPromiseReactionData` (quickjs.c, `js_promise_then`).
+#[derive(Clone)]
+pub struct PromiseReaction {
+    pub on_fulfilled: Option<JsValue>,
+    pub on_rejected: Option<JsValue>,
+    pub promise: Option<ObjRef>,
+}
+
 #[derive(Clone)]
 pub struct PromiseData {
     pub state: PromiseState,
     pub value: JsValue,
+    pub reactions: Vec<PromiseReaction>,
+    pub handled: bool,
 }
 
 /// Object representation corresponding to QuickJS `JSObject` (quickjs.c:5900
@@ -464,10 +481,12 @@ impl ObjectData {
         Self {
             props: PropertyMap::default(),
             prototype,
-            kind: ObjectKind::Promise(PromiseData {
+            kind: ObjectKind::Promise(Box::new(PromiseData {
                 state: PromiseState::Pending,
                 value: JsValue::Undefined,
-            }),
+                reactions: Vec::new(),
+                handled: false,
+            })),
             extensible: true,
             class_name: "Promise",
         }
@@ -597,14 +616,27 @@ impl ObjectData {
     }
 
     pub fn get_own(&self, key: &PropKey) -> Option<&Property> {
-        self.props.get(&key.canonical())
+        self.property(key)
     }
 
     pub fn has_own(&self, key: &PropKey) -> bool {
         if self.has_array_key(key) {
             return true;
         }
-        self.props.contains_key(&key.canonical())
+        self.property(key).is_some()
+    }
+
+    /// Fast property lookup for already-canonical VM keys. Only numeric
+    /// string keys need a canonical fallback, mirroring QuickJS' atom keys.
+    fn property(&self, key: &PropKey) -> Option<&Property> {
+        self.props.get(key).or_else(|| {
+            if matches!(key, PropKey::Str(_)) {
+                let canonical = key.canonical();
+                self.props.get(&canonical)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn has_property(&self, key: &PropKey) -> bool {
@@ -645,7 +677,7 @@ impl ObjectData {
         if let Some(value) = self.get_array_value(key) {
             return Some(value);
         }
-        self.props.get(&key.canonical()).map(|property| {
+        self.property(key).map(|property| {
             if property.is_accessor() {
                 JsValue::Undefined
             } else {
@@ -705,11 +737,11 @@ impl ObjectData {
                 own: true,
             };
         }
-        if let Some(property) = self.props.get(&key.canonical()) {
+        if let Some(property) = self.property(key) {
             if property.is_accessor() {
                 return ResolvedProperty::Accessor {
-                    get: property.get.clone(),
-                    set: property.set.clone(),
+                    get: property.get.as_deref().cloned(),
+                    set: property.set.as_deref().cloned(),
                     own: true,
                 };
             }
@@ -753,9 +785,9 @@ impl ObjectData {
         if let Some(value) = self.get_array_value(key) {
             return Ok(value);
         }
-        if let Some(property) = self.props.get(&key.canonical()) {
+        if let Some(property) = self.property(key) {
             if property.is_accessor() {
-                return match &property.get {
+                return match property.get.as_deref() {
                     Some(getter) => {
                         crate::vm::call_value(realm, getter.clone(), receiver.clone(), &[])
                     }
@@ -782,7 +814,7 @@ impl ObjectData {
         }
         if let Some(property) = self.props.get(&key.canonical()) {
             if property.is_accessor() {
-                return match &property.set {
+                return match property.set.as_deref() {
                     Some(setter) => {
                         crate::vm::call_value(realm, setter.clone(), receiver.clone(), &[value])?;
                         Ok(())
@@ -804,7 +836,7 @@ impl ObjectData {
                 let cursor = proto.borrow();
                 if let Some(property) = cursor.props.get(&key.canonical()) {
                     if property.is_accessor() {
-                        return match &property.set {
+                        return match property.set.as_deref() {
                             Some(setter) => {
                                 crate::vm::call_value(
                                     realm,

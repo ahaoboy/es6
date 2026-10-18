@@ -764,6 +764,18 @@ impl<'a> Parser<'a> {
                     is_static = true;
                 }
             }
+            let mut is_async = false;
+            if self.current.is_ident("async")
+                && let Some(next) = self.peek()
+                && (matches!(
+                    next.kind,
+                    TokenKind::Ident(_) | TokenKind::String(_) | TokenKind::Number(_)
+                ) || next.is_punct(Punct::LBracket)
+                    || next.is_punct(Punct::Star))
+            {
+                self.advance()?;
+                is_async = true;
+            }
             let mut kind = ClassElementKind::Method;
             if self.current.is_ident("get") {
                 if let Some(next) = self.peek()
@@ -782,8 +794,12 @@ impl<'a> Parser<'a> {
             let generator = self.eat_punct(Punct::Star)?;
             let key = self.parse_property_name()?;
             if self.current.is_punct(Punct::LParen) {
-                let function =
-                    self.parse_method(key.clone(), kind == ClassElementKind::Method, generator)?;
+                let function = self.parse_method(
+                    key.clone(),
+                    kind == ClassElementKind::Method,
+                    generator,
+                    is_async,
+                )?;
                 elements.push(ClassElement {
                     key,
                     kind,
@@ -821,6 +837,7 @@ impl<'a> Parser<'a> {
         key: PropertyName,
         is_method: bool,
         generator: bool,
+        is_async: bool,
     ) -> Result<Rc<Function>, ParseError> {
         let span = self.span();
         let name = property_name_string(&key);
@@ -832,7 +849,7 @@ impl<'a> Parser<'a> {
             params,
             body,
             is_arrow: false,
-            is_async: false,
+            is_async,
             is_generator: generator,
             span,
         }))
@@ -1542,6 +1559,18 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
+            let mut is_async = false;
+            if self.current.is_ident("async")
+                && let Some(next) = self.peek()
+                && (matches!(
+                    next.kind,
+                    TokenKind::Ident(_) | TokenKind::String(_) | TokenKind::Number(_)
+                ) || next.is_punct(Punct::LBracket)
+                    || next.is_punct(Punct::Star))
+            {
+                self.advance()?;
+                is_async = true;
+            }
             let mut kind = MethodKind::Method;
             if self.current.is_ident("get") {
                 if let Some(next) = self.peek()
@@ -1562,7 +1591,7 @@ impl<'a> Parser<'a> {
             let generator = self.eat_punct(Punct::Star)?;
             let key = self.parse_property_name()?;
             if self.current.is_punct(Punct::LParen) {
-                let function = self.parse_method(key.clone(), true, generator)?;
+                let function = self.parse_method(key.clone(), true, generator, is_async)?;
                 properties.push(ObjectProperty::Method {
                     key,
                     function,

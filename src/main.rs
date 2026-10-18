@@ -60,7 +60,7 @@ fn run() -> miette::Result<()> {
         }
     };
 
-    let runtime = Runtime::new();
+    let runtime = Runtime::new().map_err(|error| miette::miette!("{error}"))?;
     let context = runtime.context();
     let value = context
         .eval(&source)

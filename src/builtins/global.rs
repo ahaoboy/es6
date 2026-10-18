@@ -63,7 +63,7 @@ fn eval(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<J
     let env = Env::new(definition.env_size as usize, None);
     crate::vm::execute(
         realm,
-        &definition,
+        definition,
         env,
         JsValue::Object(realm.global.clone()),
     )

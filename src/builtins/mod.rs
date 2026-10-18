@@ -71,7 +71,7 @@ pub(crate) fn define_method(
     target: &ObjRef,
     name: &str,
     length: u32,
-    native: NativeFn,
+    native: impl Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue> + 'static,
 ) {
     let function = realm.native_function(name, length, native);
     target.borrow_mut().define(name, Property::hidden(function));
@@ -83,7 +83,7 @@ pub(crate) fn define_method_symbol(
     symbol: u32,
     name: &str,
     length: u32,
-    native: NativeFn,
+    native: impl Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue> + 'static,
 ) {
     let function = realm.native_function(name, length, native);
     target
@@ -95,17 +95,21 @@ pub(crate) fn define_accessor(
     realm: &mut Realm,
     target: &ObjRef,
     name: &str,
-    getter: NativeFn,
+    getter: impl Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue> + 'static,
     setter: Option<NativeFn>,
 ) {
     let getter = realm.native_function(&format!("get {name}"), 0, getter);
-    let setter = setter.map(|setter| realm.native_function(&format!("set {name}"), 1, setter));
+    let setter = setter.map(|setter| {
+        realm.native_function(&format!("set {name}"), 1, move |realm, this, arguments| {
+            setter(realm, this, arguments)
+        })
+    });
     target.borrow_mut().define(
         name,
         Property {
             value: JsValue::Undefined,
-            get: Some(getter),
-            set: setter,
+            get: Some(Box::new(getter)),
+            set: setter.map(Box::new),
             writable: false,
             enumerable: false,
             configurable: true,
@@ -117,7 +121,7 @@ pub(crate) fn install_constructor(
     realm: &mut Realm,
     name: &str,
     length: u32,
-    native: NativeFn,
+    native: impl Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue> + 'static,
     prototype: &ObjRef,
 ) -> JsValue {
     let function = realm.native_function(name, length, native);

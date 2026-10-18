@@ -55,8 +55,10 @@ fn install_data_view(realm: &mut Realm) {
     define_method(realm, &prototype, "setFloat64", 3, set_f64);
 }
 
+type NativeConstructor = fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue>;
+
 fn install_typed_arrays(realm: &mut Realm) {
-    let kinds: [(TypedArrayKind, crate::object::NativeFn); 9] = [
+    let kinds: [(TypedArrayKind, NativeConstructor); 9] = [
         (TypedArrayKind::Uint8, uint8_constructor),
         (TypedArrayKind::Uint8Clamped, uint8_clamped_constructor),
         (TypedArrayKind::Int8, int8_constructor),

@@ -1,16 +1,32 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use smallvec::SmallVec;
+
 use crate::bytecode::{ClassDef, Constant, FunctionDef, Op};
 use crate::object::{
-    ObjRef, Object, ObjectData, ObjectKind, PropKey, Property, RegExpData, key_to_index,
+    ObjRef, Object, ObjectData, ObjectKind, PromiseReaction, PromiseState, PropKey, Property,
+    RegExpData, key_to_index,
 };
 use crate::runtime::Realm;
 use crate::value::{Env, EnvRef, JsResult, JsValue};
 
+use crate::coerce::{abstract_compare, instance_of};
+pub use crate::coerce::{
+    add_values, format_number, loose_equals, same_value, same_value_zero, strict_equals,
+    to_boolean, to_int32, to_number, to_numeric, to_primitive, to_property_key, to_string,
+    to_uint32,
+};
+
 enum Step {
     Continue,
     Return(JsValue),
+    Await(JsValue),
+}
+
+enum RunOutcome {
+    Return(JsValue),
+    Suspended,
 }
 
 struct Handler {
@@ -20,18 +36,38 @@ struct Handler {
     index: usize,
 }
 
+/// A queued job. QuickJS stores the same entries in `JSContext.job_list` and
+/// dispatches them in `JS_ExecutePendingJob` (quickjs.c:23952).
+pub(crate) enum Job {
+    Reaction {
+        reaction: PromiseReaction,
+        state: PromiseState,
+        value: JsValue,
+    },
+    Resume {
+        frame: Box<Frame>,
+        completion: ObjRef,
+        result: JsResult<JsValue>,
+    },
+}
+
+pub(crate) type SuspendedFrame = Rc<RefCell<Option<Box<Frame>>>>;
+type ValueStack = SmallVec<[JsValue; 4]>;
+type ArgumentStack = SmallVec<[JsValue; 4]>;
+
 /// Activation record. QuickJS' equivalent is `JSStackFrame` (quickjs.c:900
 /// area) with `var_refs`, `sp` and the operand stack in `JS_CallInternal`
-/// (quickjs.c:963).
-struct Frame<'a> {
-    definition: &'a FunctionDef,
+/// (quickjs.c:963). It is owned so `await` can move it into the job queue.
+pub(crate) struct Frame {
+    definition: Rc<FunctionDef>,
     env: EnvRef,
     this: JsValue,
     callee: Option<JsValue>,
-    stack: Vec<JsValue>,
-    arguments: Vec<JsValue>,
-    handlers: Vec<Handler>,
+    stack: ValueStack,
+    arguments: ArgumentStack,
+    handlers: SmallVec<[Handler; 4]>,
     pc: usize,
+    completion: Option<ObjRef>,
 }
 
 thread_local! {
@@ -81,53 +117,72 @@ pub fn clear_error_offset() {
 
 pub fn execute(
     realm: &mut Realm,
-    definition: &FunctionDef,
+    definition: Rc<FunctionDef>,
     env: EnvRef,
     this: JsValue,
 ) -> JsResult<JsValue> {
     ERROR_OFFSET.with(|offset| offset.set(None));
-    run_frame(realm, definition, env, this, None, Vec::new())
+    match run_frame(
+        realm,
+        definition,
+        env,
+        this,
+        None,
+        ArgumentStack::new(),
+        None,
+    )? {
+        RunOutcome::Return(value) => Ok(value),
+        RunOutcome::Suspended => Ok(JsValue::Undefined),
+    }
 }
 
 fn run_frame(
     realm: &mut Realm,
-    definition: &FunctionDef,
+    definition: Rc<FunctionDef>,
     env: EnvRef,
     this: JsValue,
     callee: Option<JsValue>,
-    arguments: Vec<JsValue>,
-) -> JsResult<JsValue> {
-    let mut frame = Frame {
+    arguments: ArgumentStack,
+    completion: Option<ObjRef>,
+) -> JsResult<RunOutcome> {
+    let frame = Frame {
         definition,
         env,
         this,
         callee,
-        stack: Vec::with_capacity(16),
+        stack: ValueStack::new(),
         arguments,
-        handlers: Vec::new(),
+        handlers: SmallVec::new(),
         pc: 0,
+        completion,
     };
+    run_loop(realm, frame)
+}
+
+fn run_loop(realm: &mut Realm, mut frame: Frame) -> JsResult<RunOutcome> {
     loop {
-        if frame.pc >= definition.code.len() {
-            return Ok(JsValue::Undefined);
+        if frame.pc >= frame.definition.code.len() {
+            return Ok(RunOutcome::Return(JsValue::Undefined));
         }
-        let op = definition.code[frame.pc];
+        let op = frame.definition.code[frame.pc];
         frame.pc += 1;
-        let result = execute_op(realm, &mut frame, op);
-        match result {
+        match execute_op(realm, &mut frame, op) {
             Ok(Step::Continue) => {}
-            Ok(Step::Return(value)) => return Ok(value),
+            Ok(Step::Return(value)) => return Ok(RunOutcome::Return(value)),
+            Ok(Step::Await(value)) => {
+                let Some(completion) = frame.completion.clone() else {
+                    let value = await_sync(realm, value)?;
+                    frame.stack.push(value);
+                    continue;
+                };
+                let suspended: SuspendedFrame = Rc::new(RefCell::new(Some(Box::new(frame))));
+                crate::promise::await_value(realm, value, suspended, completion)?;
+                return Ok(RunOutcome::Suspended);
+            }
             Err(exception) => {
                 record_error_stack(&exception);
-                if let Some(handler) = frame.handlers.pop() {
-                    ERROR_OFFSET.with(|offset| offset.set(None));
-                    frame.handlers.truncate(handler.index);
-                    frame.stack.truncate(handler.stack_len);
-                    frame.env = handler.env;
-                    frame.stack.push(exception);
-                    frame.pc = handler.catch_pc;
-                } else {
-                    if let Some(offset) = definition.positions.get(frame.pc - 1) {
+                if !unwind(&mut frame, exception.clone()) {
+                    if let Some(offset) = frame.definition.positions.get(frame.pc - 1) {
                         ERROR_OFFSET.with(|current| {
                             if current.get().is_none() {
                                 current.set(Some(*offset as usize));
@@ -137,6 +192,74 @@ fn run_frame(
                     return Err(exception);
                 }
             }
+        }
+    }
+}
+
+fn unwind(frame: &mut Frame, exception: JsValue) -> bool {
+    let Some(handler) = frame.handlers.pop() else {
+        return false;
+    };
+    ERROR_OFFSET.with(|offset| offset.set(None));
+    frame.handlers.truncate(handler.index);
+    frame.stack.truncate(handler.stack_len);
+    frame.env = handler.env;
+    frame.stack.push(exception);
+    frame.pc = handler.catch_pc;
+    true
+}
+
+/// `await` in a non-async context keeps the old synchronous behaviour.
+fn await_sync(_realm: &mut Realm, value: JsValue) -> JsResult<JsValue> {
+    let Some(promise) = crate::promise::promise_object(&value) else {
+        return Ok(value);
+    };
+    let Some((state, value)) = crate::promise::state(&promise) else {
+        return Ok(JsValue::Undefined);
+    };
+    match state {
+        PromiseState::Fulfilled => Ok(value),
+        PromiseState::Rejected => Err(value),
+        PromiseState::Pending => Ok(JsValue::Undefined),
+    }
+}
+
+pub(crate) fn run_job(realm: &mut Realm, job: Job) -> JsResult<()> {
+    match job {
+        Job::Reaction {
+            reaction,
+            state,
+            value,
+        } => {
+            crate::promise::reaction(realm, reaction, state, value);
+            Ok(())
+        }
+        Job::Resume {
+            mut frame,
+            completion,
+            result,
+        } => {
+            frame.completion = Some(completion.clone());
+            match result {
+                Ok(value) => frame.stack.push(value),
+                Err(exception) => {
+                    if !unwind(&mut frame, exception.clone()) {
+                        let _ = crate::promise::reject(realm, &completion, exception);
+                        return Ok(());
+                    }
+                }
+            }
+            match run_loop(realm, *frame) {
+                Ok(RunOutcome::Return(value)) => {
+                    crate::promise::resolve(realm, &completion, value)?;
+                }
+                Ok(RunOutcome::Suspended) => {}
+                Err(error) => {
+                    clear_error_offset();
+                    let _ = crate::promise::reject(realm, &completion, error);
+                }
+            }
+            Ok(())
         }
     }
 }
@@ -152,7 +275,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         Op::False => frame.stack.push(JsValue::Bool(false)),
         Op::This => frame.stack.push(frame.this.clone()),
         Op::PushConst(index) => {
-            let value = constant_value(realm, frame.definition, index, &frame.env)?;
+            let value = constant_value(realm, &frame.definition, index, &frame.env)?;
             frame.stack.push(value);
         }
         Op::Pop => {
@@ -188,7 +311,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         Op::Arguments => {
             frame
                 .stack
-                .push(JsValue::Object(realm.array(frame.arguments.clone())));
+                .push(JsValue::Object(realm.array(frame.arguments.to_vec())));
         }
         Op::RestArgs(index) => {
             let start = index as usize;
@@ -208,7 +331,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             frame.env.set(depth as usize, slot as usize, value);
         }
         Op::GetGlobal(index) => {
-            let name = constant_string(frame.definition, index);
+            let name = constant_string(&frame.definition, index);
             match global_get(realm, &name) {
                 Some(value) => frame.stack.push(value),
                 None => return Err(realm.reference_error(format!("{name} is not defined"))),
@@ -216,11 +339,11 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         }
         Op::SetGlobal(index) => {
             let value = pop(&mut frame.stack)?;
-            let name = constant_string(frame.definition, index);
+            let name = constant_string(&frame.definition, index);
             Object::from_ref(realm.global.clone()).set_key(PropKey::Str(name), value);
         }
         Op::DeleteGlobal(index) => {
-            let name = constant_string(frame.definition, index);
+            let name = constant_string(&frame.definition, index);
             let deleted = Object::from_ref(realm.global.clone()).delete(&name);
             frame.stack.push(JsValue::Bool(deleted));
         }
@@ -253,21 +376,21 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             frame.stack.push(JsValue::Bool(deleted));
         }
         Op::GetPropConst(index) => {
-            let key = property_key_from_constant(frame.definition, index)?;
+            let key = property_key_from_constant(&frame.definition, index)?;
             let object = pop(&mut frame.stack)?;
             let value = get_value_property(realm, &object, &key)?;
             frame.stack.push(value);
         }
         Op::SetPropConst(index) => {
             let value = pop(&mut frame.stack)?;
-            let key = property_key_from_constant(frame.definition, index)?;
+            let key = property_key_from_constant(&frame.definition, index)?;
             let object = pop(&mut frame.stack)?;
             set_value_property(realm, &object, &key, value.clone(), true)?;
             frame.stack.push(value);
         }
         Op::SetPropConstKeep(index) => {
             let value = pop(&mut frame.stack)?;
-            let key = property_key_from_constant(frame.definition, index)?;
+            let key = property_key_from_constant(&frame.definition, index)?;
             let object = pop(&mut frame.stack)?;
             set_value_property(realm, &object, &key, value, true)?;
             frame.stack.push(object);
@@ -287,9 +410,9 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
                     configurable: true,
                 });
                 if is_getter {
-                    property.get = Some(function);
+                    property.get = Some(Box::new(function));
                 } else {
-                    property.set = Some(function);
+                    property.set = Some(Box::new(function));
                 }
             } else {
                 return Err(realm.type_error("Cannot define accessor on primitive"));
@@ -301,7 +424,9 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             if frame.stack.len() < count {
                 return Err(realm.type_error("Stack underflow"));
             }
-            let items = frame.stack.split_off(frame.stack.len() - count);
+            let start = frame.stack.len() - count;
+            let items = frame.stack[start..].to_vec();
+            frame.stack.truncate(start);
             frame.stack.push(JsValue::Object(realm.array(items)));
         }
         Op::ArrayPush => {
@@ -339,7 +464,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             frame.stack.push(JsValue::Object(realm.array(rest)));
         }
         Op::ObjectRest(index) => {
-            let excluded = constant_strings(frame.definition, index);
+            let excluded = constant_strings(&frame.definition, index);
             let value = pop(&mut frame.stack)?;
             let rest = realm.object();
             if let JsValue::Object(source) = &value {
@@ -366,14 +491,14 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         Op::Call(argc) => {
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let function = pop(&mut frame.stack)?;
-            let value = call_value(realm, function, JsValue::Undefined, &arguments)?;
+            let value = call_value_owned(realm, function, JsValue::Undefined, arguments)?;
             frame.stack.push(value);
         }
         Op::CallMethod(argc) => {
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let function = pop(&mut frame.stack)?;
             let this = pop(&mut frame.stack)?;
-            let value = call_value(realm, function, this, &arguments)?;
+            let value = call_value_owned(realm, function, this, arguments)?;
             frame.stack.push(value);
         }
         Op::CallSpread => {
@@ -393,7 +518,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let key = pop_property_key(realm, &mut frame.stack)?;
             let function = super_function(realm, frame, &key)?;
-            let value = call_value(realm, function, frame.this.clone(), &arguments)?;
+            let value = call_value_owned(realm, function, frame.this.clone(), arguments)?;
             frame.stack.push(value);
         }
         Op::CallSuperMethodSpread => {
@@ -557,7 +682,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
             frame.stack.push(JsValue::string(value.type_of()));
         }
         Op::TypeOfGlobal(index) => {
-            let name = constant_string(frame.definition, index);
+            let name = constant_string(&frame.definition, index);
             let value = global_get(realm, &name);
             frame.stack.push(JsValue::string(match value {
                 Some(value) => value.type_of(),
@@ -570,27 +695,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         }
         Op::Await => {
             let value = pop(&mut frame.stack)?;
-            let value = if let JsValue::Object(object) = &value {
-                let promise = {
-                    let data = object.borrow();
-                    match &data.kind {
-                        ObjectKind::Promise(promise) => Some(promise.clone()),
-                        _ => None,
-                    }
-                };
-                if let Some(promise) = promise {
-                    match promise.state {
-                        crate::object::PromiseState::Fulfilled => promise.value,
-                        crate::object::PromiseState::Rejected => return Err(promise.value),
-                        crate::object::PromiseState::Pending => JsValue::Undefined,
-                    }
-                } else {
-                    value
-                }
-            } else {
-                value
-            };
-            frame.stack.push(value);
+            return Ok(Step::Await(value));
         }
         Op::IncVar {
             depth,
@@ -619,7 +724,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
                 .push(if prefix { new } else { JsValue::number(number) });
         }
         Op::IncGlobal(index, prefix) => {
-            let name = constant_string(frame.definition, index);
+            let name = constant_string(&frame.definition, index);
             let old = global_get(realm, &name).unwrap_or(JsValue::Undefined);
             let number = to_numeric(realm, old)?;
             let new = JsValue::number(number + 1.0);
@@ -629,7 +734,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
                 .push(if prefix { new } else { JsValue::number(number) });
         }
         Op::DecGlobal(index, prefix) => {
-            let name = constant_string(frame.definition, index);
+            let name = constant_string(&frame.definition, index);
             let old = global_get(realm, &name).unwrap_or(JsValue::Undefined);
             let number = to_numeric(realm, old)?;
             let new = JsValue::number(number - 1.0);
@@ -662,7 +767,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         Op::Closure(index) => {
             let value = closure_value(
                 realm,
-                frame.definition,
+                &frame.definition,
                 index,
                 &frame.env,
                 frame.this.clone(),
@@ -734,7 +839,7 @@ fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResult<Step> {
         }
         Op::CreateClass(index) => {
             let parent = pop(&mut frame.stack)?;
-            let class = class_constant(frame.definition, index)?;
+            let class = class_constant(&frame.definition, index)?;
             let value = create_class(realm, &class, &frame.env, parent)?;
             frame.stack.push(value);
         }
@@ -831,7 +936,7 @@ fn compare_op(
     Ok(())
 }
 
-fn pop(stack: &mut Vec<JsValue>) -> JsResult<JsValue> {
+fn pop(stack: &mut ValueStack) -> JsResult<JsValue> {
     stack
         .pop()
         .ok_or_else(|| JsValue::string("InternalError: stack underflow"))
@@ -843,14 +948,17 @@ fn peek(stack: &[JsValue]) -> JsResult<&JsValue> {
         .ok_or_else(|| JsValue::string("InternalError: stack underflow"))
 }
 
-fn pop_arguments(stack: &mut Vec<JsValue>, count: usize) -> JsResult<Vec<JsValue>> {
+fn pop_arguments(stack: &mut ValueStack, count: usize) -> JsResult<ArgumentStack> {
     if stack.len() < count {
         return Err(JsValue::string("InternalError: stack underflow"));
     }
-    Ok(stack.split_off(stack.len() - count))
+    let start = stack.len() - count;
+    let values = stack[start..].iter().cloned().collect();
+    stack.truncate(start);
+    Ok(values)
 }
 
-fn pop_array(stack: &mut Vec<JsValue>) -> JsResult<Vec<JsValue>> {
+fn pop_array(stack: &mut ValueStack) -> JsResult<Vec<JsValue>> {
     let value = pop(stack)?;
     match value {
         JsValue::Object(object) => {
@@ -880,7 +988,7 @@ fn constant_strings(definition: &FunctionDef, index: u32) -> Rc<[Rc<str>]> {
 
 fn property_key_from_constant(definition: &FunctionDef, index: u32) -> JsResult<PropKey> {
     match definition.constants.get(index as usize) {
-        Some(Constant::String(value)) => Ok(PropKey::Str(value.clone())),
+        Some(Constant::String(value)) => Ok(crate::object::key_from_string(value.clone())),
         Some(Constant::Number(value)) => Ok(PropKey::Str(Rc::from(format_number(*value)))),
         _ => Err(JsValue::string("InternalError: invalid property constant")),
     }
@@ -1014,9 +1122,9 @@ fn create_class(
                     configurable: true,
                 });
             if method.is_getter {
-                property.get = Some(function);
+                property.get = Some(Box::new(function));
             } else {
-                property.set = Some(function);
+                property.set = Some(Box::new(function));
             }
         } else {
             target.set_key(PropKey::Str(method.name.clone()), function);
@@ -1034,6 +1142,15 @@ pub fn call_value(
     this: JsValue,
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
+    call_value_owned(realm, callee, this, arguments.iter().cloned().collect())
+}
+
+fn call_value_owned(
+    realm: &mut Realm,
+    callee: JsValue,
+    this: JsValue,
+    arguments: ArgumentStack,
+) -> JsResult<JsValue> {
     let function = callee
         .as_object()
         .and_then(|object| object.to_ref().borrow().function());
@@ -1041,12 +1158,12 @@ pub fn call_value(
         return Err(realm.type_error("Value is not a function"));
     };
     if let Some(bound) = &function.bound {
-        let mut combined = bound.arguments.clone();
-        combined.extend_from_slice(arguments);
-        return call_value(realm, bound.target.clone(), bound.this.clone(), &combined);
+        let mut combined: ArgumentStack = bound.arguments.iter().cloned().collect();
+        combined.extend(arguments);
+        return call_value_owned(realm, bound.target.clone(), bound.this.clone(), combined);
     }
-    if let Some(native) = function.native {
-        return native(realm, &this, arguments);
+    if let Some(native) = function.native.clone() {
+        return native(realm, &this, &arguments);
     }
     let definition = function
         .def
@@ -1068,36 +1185,37 @@ pub fn call_value(
     } else {
         this
     };
+    let completion = definition.is_async.then(|| realm.promise());
     let result = run_frame(
         realm,
-        &definition,
+        definition.clone(),
         env,
         this,
         Some(callee),
-        arguments.to_vec(),
+        arguments,
+        completion.clone(),
     );
     if trace {
         CALL_STACK.with(|stack| {
             stack.borrow_mut().pop();
         });
     }
-    if definition.is_async {
-        let promise = realm.promise();
-        if let ObjectKind::Promise(data) = &mut promise.borrow_mut().kind {
-            match &result {
-                Ok(value) => {
-                    data.state = crate::object::PromiseState::Fulfilled;
-                    data.value = value.clone();
-                }
-                Err(error) => {
-                    data.state = crate::object::PromiseState::Rejected;
-                    data.value = error.clone();
-                }
-            }
+    let Some(completion) = completion else {
+        return match result? {
+            RunOutcome::Return(value) => Ok(value),
+            RunOutcome::Suspended => Ok(JsValue::Undefined),
+        };
+    };
+    match result {
+        Ok(RunOutcome::Return(value)) => {
+            crate::promise::resolve(realm, &completion, value)?;
         }
-        return Ok(JsValue::Object(promise));
+        Ok(RunOutcome::Suspended) => {}
+        Err(error) => {
+            crate::promise::reject(realm, &completion, error)?;
+        }
     }
-    result
+    Ok(JsValue::Object(completion))
 }
 
 /// QuickJS `JS_CallConstructorInternal`; allocates the receiver from
@@ -1117,6 +1235,13 @@ pub fn construct_value(
         let mut combined = bound.arguments.clone();
         combined.extend_from_slice(arguments);
         return construct_value(realm, bound.target.clone(), &combined);
+    }
+    if function
+        .def
+        .as_ref()
+        .is_some_and(|definition| definition.is_arrow || definition.is_async)
+    {
+        return Err(realm.type_error("Value is not a constructor"));
     }
     let prototype = get_value_property(realm, &callee, &PropKey::from("prototype"))?;
     let prototype = match prototype {
@@ -1229,52 +1354,57 @@ pub fn set_value_property(
 ) -> JsResult<()> {
     match value {
         JsValue::Object(object) => {
-            let resolved = object.borrow().resolve_property(key);
-            match resolved {
-                crate::object::ResolvedProperty::Accessor {
-                    set: Some(setter), ..
-                } => {
-                    call_value(realm, setter, value.clone(), &[new_value])?;
-                    Ok(())
-                }
-                crate::object::ResolvedProperty::Accessor { set: None, .. } => Ok(()),
-                crate::object::ResolvedProperty::Data {
-                    writable,
-                    own: true,
-                    ..
-                } => {
-                    if writable {
-                        let mut data = object.borrow_mut();
-                        if data.put_array_value(realm, key, &new_value)?.is_some() {
-                            return Ok(());
-                        }
-                        if let Some(property) = data.props.get_mut(key) {
-                            property.value = new_value;
-                        }
-                    }
-                    Ok(())
-                }
-                crate::object::ResolvedProperty::Data {
-                    writable,
-                    own: false,
-                    ..
-                } => {
-                    if writable {
-                        let mut data = object.borrow_mut();
-                        if data.put_array_value(realm, key, &new_value)?.is_none() {
-                            data.define(key.clone(), Property::data(new_value));
-                        }
-                    }
-                    Ok(())
-                }
-                crate::object::ResolvedProperty::Missing => {
-                    let mut data = object.borrow_mut();
-                    if data.put_array_value(realm, key, &new_value)?.is_none() && data.extensible {
-                        data.define(key.clone(), Property::data(new_value));
-                    }
-                    Ok(())
-                }
+            let canonical = key.canonical();
+            let prototype = object.borrow().prototype.clone();
+            let mut data = object.borrow_mut();
+            if data.put_array_value(realm, key, &new_value)?.is_some() {
+                return Ok(());
             }
+            if let Some(property) = data.props.get_mut(&canonical) {
+                if property.is_accessor() {
+                    let setter = property.set.as_deref().cloned();
+                    drop(data);
+                    if let Some(setter) = setter {
+                        call_value(realm, setter, value.clone(), &[new_value])?;
+                    }
+                    return Ok(());
+                }
+                if property.writable {
+                    property.value = new_value;
+                }
+                return Ok(());
+            }
+            let extensible = data.extensible;
+            drop(data);
+
+            if let Some(prototype) = prototype
+                && prototype.borrow().has_property(&canonical)
+            {
+                let resolved = prototype.borrow().resolve_property(&canonical);
+                match resolved {
+                    crate::object::ResolvedProperty::Accessor {
+                        set: Some(setter), ..
+                    } => {
+                        call_value(realm, setter, value.clone(), &[new_value])?;
+                    }
+                    crate::object::ResolvedProperty::Accessor { set: None, .. } => {}
+                    crate::object::ResolvedProperty::Data { writable, .. } => {
+                        if writable && extensible {
+                            object
+                                .borrow_mut()
+                                .define(canonical, Property::data(new_value));
+                        }
+                    }
+                    crate::object::ResolvedProperty::Missing => {}
+                }
+                return Ok(());
+            }
+            if extensible {
+                object
+                    .borrow_mut()
+                    .define(canonical, Property::data(new_value));
+            }
+            Ok(())
         }
         JsValue::Undefined | JsValue::Null => Err(realm.type_error(format!(
             "Cannot set properties of {} (setting '{}')",
@@ -1304,427 +1434,9 @@ fn global_get(realm: &Realm, name: &str) -> Option<JsValue> {
     }
 }
 
-pub fn to_boolean(value: &JsValue) -> bool {
-    match value {
-        JsValue::Undefined | JsValue::Null => false,
-        JsValue::Bool(value) => *value,
-        JsValue::Int(value) => *value != 0,
-        JsValue::Float(value) => *value != 0.0 && !value.is_nan(),
-        JsValue::String(value) => !value.is_empty(),
-        JsValue::Symbol(_) => true,
-        JsValue::Object(_) => true,
-    }
-}
-
-/// ECMAScript `ToNumeric` for arithmetic operators: objects are first
-/// converted with `ToPrimitive` (hint number). QuickJS performs the same
-/// two-stage conversion in `JS_ToNumberHintFree`/`js_unary_arith_slow`.
-pub fn to_numeric(realm: &mut Realm, value: JsValue) -> JsResult<f64> {
-    let value = to_primitive(realm, value)?;
-    to_number(value)
-}
-
-pub fn to_number(value: JsValue) -> JsResult<f64> {
-    Ok(match value {
-        JsValue::Undefined => f64::NAN,
-        JsValue::Null => 0.0,
-        JsValue::Bool(value) => {
-            if value {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        JsValue::Int(value) => value as f64,
-        JsValue::Float(value) => value,
-        JsValue::String(value) => string_to_number(&value),
-        JsValue::Symbol(_) => {
-            return Err(JsValue::string(
-                "TypeError: cannot convert a Symbol value to a number",
-            ));
-        }
-        JsValue::Object(_) => {
-            return Err(JsValue::string(
-                "TypeError: cannot convert object to number",
-            ));
-        }
-    })
-}
-
-fn string_to_number(value: &str) -> f64 {
-    let value = value.trim();
-    if value.is_empty() {
-        return 0.0;
-    }
-    if value == "Infinity" || value == "+Infinity" {
-        return f64::INFINITY;
-    }
-    if value == "-Infinity" {
-        return f64::NEG_INFINITY;
-    }
-    if let Some(rest) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        return u64::from_str_radix(rest, 16)
-            .map(|v| v as f64)
-            .unwrap_or(f64::NAN);
-    }
-    if let Some(rest) = value
-        .strip_prefix("0b")
-        .or_else(|| value.strip_prefix("0B"))
-    {
-        return u64::from_str_radix(rest, 2)
-            .map(|v| v as f64)
-            .unwrap_or(f64::NAN);
-    }
-    if let Some(rest) = value
-        .strip_prefix("0o")
-        .or_else(|| value.strip_prefix("0O"))
-    {
-        return u64::from_str_radix(rest, 8)
-            .map(|v| v as f64)
-            .unwrap_or(f64::NAN);
-    }
-    value.parse().unwrap_or(f64::NAN)
-}
-
-pub fn to_string(realm: &mut Realm, value: JsValue) -> JsResult<String> {
-    match value {
-        JsValue::Undefined => Ok("undefined".into()),
-        JsValue::Null => Ok("null".into()),
-        JsValue::Bool(value) => Ok(if value { "true" } else { "false" }.into()),
-        JsValue::Int(value) => Ok(value.to_string()),
-        JsValue::Float(value) => Ok(format_number(value)),
-        JsValue::String(value) => Ok(value.to_string()),
-        JsValue::Symbol(id) => {
-            let description = realm.symbol_description(id);
-            Ok(if description.is_empty() {
-                "Symbol()".into()
-            } else {
-                format!("Symbol({description})")
-            })
-        }
-        JsValue::Object(object) => {
-            let data = object.borrow();
-            match &data.kind {
-                ObjectKind::Array(array) => {
-                    let items = array.items.clone();
-                    let length = array.length;
-                    drop(data);
-                    let mut parts = Vec::with_capacity(length);
-                    for index in 0..length {
-                        let item = items.get(index).cloned().unwrap_or(JsValue::Undefined);
-                        if item.is_nullish() {
-                            parts.push(String::new());
-                        } else {
-                            parts.push(to_string(realm, item)?);
-                        }
-                    }
-                    Ok(parts.join(","))
-                }
-                ObjectKind::BoxedString(value) => Ok(value.to_string()),
-                ObjectKind::BoxedNumber(value) => Ok(format_number(*value)),
-                ObjectKind::BoxedBool(value) => Ok(value.to_string()),
-                ObjectKind::TypedArray(array) => {
-                    let values = array.values();
-                    drop(data);
-                    let mut parts = Vec::with_capacity(values.len());
-                    for value in values {
-                        parts.push(to_string(realm, value)?);
-                    }
-                    Ok(parts.join(","))
-                }
-                ObjectKind::ArrayBuffer(_) => Ok("[object ArrayBuffer]".into()),
-                ObjectKind::DataView(_) => Ok("[object DataView]".into()),
-                ObjectKind::Function(function) => {
-                    Ok(format!("function {}() {{ [native code] }}", function.name))
-                }
-                ObjectKind::Error => {
-                    let name = data
-                        .get_own_value(&PropKey::from("name"))
-                        .and_then(|value| value.as_string())
-                        .unwrap_or_else(|| Rc::from("Error"));
-                    let message = data
-                        .get_own_value(&PropKey::from("message"))
-                        .map(|value| value.as_string().unwrap_or_else(|| Rc::from("")))
-                        .unwrap_or_else(|| Rc::from(""));
-                    if message.is_empty() {
-                        Ok(name.to_string())
-                    } else {
-                        Ok(format!("{name}: {message}"))
-                    }
-                }
-                ObjectKind::RegExp(regexp) => Ok(format!("/{}/{}", regexp.source, regexp.flags)),
-                ObjectKind::Date(value) => Ok(format_date(*value)),
-                _ => Ok("[object Object]".into()),
-            }
-        }
-    }
-}
-
-fn format_date(value: f64) -> String {
-    if !value.is_finite() {
-        return "Invalid Date".into();
-    }
-    let seconds = (value / 1000.0).floor() as i64;
-    let days = seconds.div_euclid(86_400);
-    let time = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
-        year,
-        month + 1,
-        day,
-        time / 3600,
-        (time / 60) % 60,
-        time % 60
-    )
-}
-
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    (y + if m <= 2 { 1 } else { 0 }, m - 1, d)
-}
-
-pub fn format_number(value: f64) -> String {
-    if value.is_nan() {
-        return "NaN".into();
-    }
-    if value == f64::INFINITY {
-        return "Infinity".into();
-    }
-    if value == f64::NEG_INFINITY {
-        return "-Infinity".into();
-    }
-    if value == 0.0 {
-        return "0".into();
-    }
-    if value.fract() == 0.0 && value.abs() < 1e21 {
-        return format!("{}", value as i64);
-    }
-    let mut buffer = ryu::Buffer::new();
-    buffer.format(value).to_owned()
-}
-
-pub fn pop_property_key(realm: &mut Realm, stack: &mut Vec<JsValue>) -> JsResult<PropKey> {
+pub(crate) fn pop_property_key(realm: &mut Realm, stack: &mut ValueStack) -> JsResult<PropKey> {
     let value = pop(stack)?;
     to_property_key(realm, value)
-}
-
-pub fn to_property_key(realm: &mut Realm, value: JsValue) -> JsResult<PropKey> {
-    match value {
-        JsValue::String(value) => Ok(crate::object::key_from_string(value)),
-        JsValue::Int(value) => Ok(PropKey::Index(value.max(0) as usize)),
-        JsValue::Float(value) if value.fract() == 0.0 && value >= 0.0 => {
-            Ok(PropKey::Index(value as usize))
-        }
-        JsValue::Float(value) => Ok(PropKey::Str(Rc::from(format_number(value)))),
-        JsValue::Undefined => Ok(PropKey::from("undefined")),
-        JsValue::Null => Ok(PropKey::from("null")),
-        JsValue::Bool(value) => Ok(PropKey::from(if value { "true" } else { "false" })),
-        JsValue::Symbol(id) => Ok(PropKey::Symbol(id)),
-        JsValue::Object(_) => Ok(PropKey::Str(Rc::from(to_string(realm, value)?))),
-    }
-}
-
-pub fn add_values(realm: &mut Realm, left: JsValue, right: JsValue) -> JsResult<JsValue> {
-    let left = to_primitive(realm, left)?;
-    let right = to_primitive(realm, right)?;
-    if matches!(left, JsValue::String(_)) || matches!(right, JsValue::String(_)) {
-        let left = to_string(realm, left)?;
-        let right = to_string(realm, right)?;
-        return Ok(JsValue::string(left + &right));
-    }
-    Ok(JsValue::number(
-        to_numeric(realm, left)? + to_numeric(realm, right)?,
-    ))
-}
-
-pub fn to_primitive(realm: &mut Realm, value: JsValue) -> JsResult<JsValue> {
-    match value {
-        JsValue::Object(object) => {
-            {
-                let data = object.borrow();
-                match &data.kind {
-                    ObjectKind::BoxedString(value) => return Ok(JsValue::String(value.clone())),
-                    ObjectKind::BoxedNumber(value) => return Ok(JsValue::number(*value)),
-                    ObjectKind::BoxedBool(value) => return Ok(JsValue::Bool(*value)),
-                    ObjectKind::Array(_) => {}
-                    ObjectKind::Error => {}
-                    _ => {}
-                }
-            }
-            let value_object = JsValue::Object(object);
-            let value_of = get_value_property(realm, &value_object, &PropKey::from("valueOf"))?;
-            if value_of.is_function() {
-                let result = call_value(realm, value_of, value_object.clone(), &[])?;
-                if !result.is_object() {
-                    return Ok(result);
-                }
-            }
-            let to_string_fn =
-                get_value_property(realm, &value_object, &PropKey::from("toString"))?;
-            if to_string_fn.is_function() {
-                let result = call_value(realm, to_string_fn, value_object.clone(), &[])?;
-                if !result.is_object() {
-                    return Ok(result);
-                }
-            }
-            Err(realm.type_error("Cannot convert object to primitive value"))
-        }
-        value => Ok(value),
-    }
-}
-
-pub fn same_value(left: &JsValue, right: &JsValue) -> bool {
-    if strict_equals(left, right) {
-        if matches!(left, JsValue::Int(_) | JsValue::Float(_)) {
-            let a = left.as_number().unwrap();
-            let b = right.as_number().unwrap();
-            if a == 0.0 && b == 0.0 {
-                return a.is_sign_negative() == b.is_sign_negative();
-            }
-        }
-        return true;
-    }
-    matches!(
-        (left, right),
-        (JsValue::Int(_) | JsValue::Float(_), JsValue::Int(_) | JsValue::Float(_))
-            if left.as_number().is_some_and(f64::is_nan)
-                && right.as_number().is_some_and(f64::is_nan)
-    )
-}
-
-pub fn same_value_zero(left: &JsValue, right: &JsValue) -> bool {
-    if strict_equals(left, right) {
-        return true;
-    }
-    matches!(
-        (left, right),
-        (JsValue::Int(_) | JsValue::Float(_), JsValue::Int(_) | JsValue::Float(_))
-            if left.as_number().is_some_and(f64::is_nan)
-                && right.as_number().is_some_and(f64::is_nan)
-    )
-}
-
-pub fn strict_equals(left: &JsValue, right: &JsValue) -> bool {
-    match (left, right) {
-        (JsValue::Undefined, JsValue::Undefined) | (JsValue::Null, JsValue::Null) => true,
-        (JsValue::Bool(a), JsValue::Bool(b)) => a == b,
-        (JsValue::Int(a), JsValue::Int(b)) => a == b,
-        (JsValue::Int(a), JsValue::Float(b)) | (JsValue::Float(b), JsValue::Int(a)) => {
-            (*a as f64) == *b
-        }
-        (JsValue::Float(a), JsValue::Float(b)) => a == b,
-        (JsValue::String(a), JsValue::String(b)) => a == b,
-        (JsValue::Symbol(a), JsValue::Symbol(b)) => a == b,
-        (JsValue::Object(a), JsValue::Object(b)) => Rc::ptr_eq(a, b),
-        _ => false,
-    }
-}
-
-pub fn loose_equals(realm: &mut Realm, left: &JsValue, right: &JsValue) -> JsResult<bool> {
-    if strict_equals(left, right) {
-        return Ok(true);
-    }
-    match (left, right) {
-        (JsValue::Null | JsValue::Undefined, JsValue::Null | JsValue::Undefined) => Ok(true),
-        (JsValue::Int(_) | JsValue::Float(_), JsValue::String(_)) => {
-            Ok(to_number(left.clone())? == to_number(right.clone())?)
-        }
-        (JsValue::String(_), JsValue::Int(_) | JsValue::Float(_)) => {
-            Ok(to_number(left.clone())? == to_number(right.clone())?)
-        }
-        (JsValue::Bool(_), _) => {
-            loose_equals(realm, &JsValue::number(to_number(left.clone())?), right)
-        }
-        (_, JsValue::Bool(_)) => {
-            loose_equals(realm, left, &JsValue::number(to_number(right.clone())?))
-        }
-        (JsValue::Object(_), JsValue::Int(_) | JsValue::Float(_) | JsValue::String(_)) => {
-            let left = to_primitive(realm, left.clone())?;
-            loose_equals(realm, &left, right)
-        }
-        (JsValue::Int(_) | JsValue::Float(_) | JsValue::String(_), JsValue::Object(_)) => {
-            let right = to_primitive(realm, right.clone())?;
-            loose_equals(realm, left, &right)
-        }
-        _ => Ok(false),
-    }
-}
-
-fn abstract_compare(realm: &mut Realm, left: &JsValue, right: &JsValue) -> JsResult<Option<i32>> {
-    let left = to_primitive(realm, left.clone())?;
-    let right = to_primitive(realm, right.clone())?;
-    if let (JsValue::String(left), JsValue::String(right)) = (&left, &right) {
-        return Ok(Some(match left.cmp(right) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        }));
-    }
-    let left = to_number(left)?;
-    let right = to_number(right)?;
-    if left.is_nan() || right.is_nan() {
-        Ok(None)
-    } else if left < right {
-        Ok(Some(-1))
-    } else if left > right {
-        Ok(Some(1))
-    } else {
-        Ok(Some(0))
-    }
-}
-
-fn instance_of(realm: &mut Realm, value: &JsValue, constructor: &JsValue) -> JsResult<bool> {
-    let Some(constructor_object) = constructor.as_object() else {
-        return Err(realm.type_error("Right-hand side of instanceof is not callable"));
-    };
-    let prototype = get_value_property(realm, constructor, &PropKey::from("prototype"))?;
-    let JsValue::Object(prototype) = prototype else {
-        return Err(realm.type_error("Function has non-object prototype in instanceof"));
-    };
-    let mut current = match value {
-        JsValue::Object(value) => value.borrow().prototype.clone(),
-        _ => return Ok(false),
-    };
-    while let Some(object) = current {
-        if Rc::ptr_eq(&object, &prototype) {
-            return Ok(true);
-        }
-        current = object.borrow().prototype.clone();
-    }
-    let _ = constructor_object;
-    Ok(false)
-}
-
-pub fn to_int32(value: f64) -> i32 {
-    if !value.is_finite() || value == 0.0 {
-        return 0;
-    }
-    let value = value.trunc();
-    let modulo = value.rem_euclid(4_294_967_296.0);
-    if modulo >= 2_147_483_648.0 {
-        (modulo - 4_294_967_296.0) as i32
-    } else {
-        modulo as i32
-    }
-}
-
-pub fn to_uint32(value: f64) -> u32 {
-    if !value.is_finite() || value == 0.0 {
-        return 0;
-    }
-    value.trunc().rem_euclid(4_294_967_296.0) as u32
 }
 
 pub fn iterable_items(realm: &mut Realm, value: JsValue) -> JsResult<Vec<JsValue>> {

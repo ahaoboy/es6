@@ -1,11 +1,12 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::fmt;
 use std::rc::Rc;
 
 use crate::builtins;
 use crate::bytecode::FunctionDef;
 use crate::compiler;
-use crate::object::{Function, JsFunction, NativeFn, ObjRef, Object, ObjectData, ObjectKind};
+use crate::object::{Function, JsFunction, ObjRef, Object, ObjectData, ObjectKind};
 use crate::parser;
 use crate::value::{Env, EnvRef, JsResult, JsValue};
 
@@ -147,6 +148,10 @@ pub struct Realm {
     pub symbols: Vec<Rc<str>>,
     pub symbol_registry: std::collections::HashMap<String, u32>,
     pub well_known_symbols: std::collections::HashMap<&'static str, u32>,
+    /// FIFO of promise/await jobs. QuickJS keeps the same list in
+    /// `JSContext.job_list` and drains it with `JS_ExecutePendingJob`
+    /// (quickjs.c:23952).
+    pub(crate) jobs: VecDeque<crate::vm::Job>,
 }
 
 impl Realm {
@@ -220,6 +225,7 @@ impl Realm {
             symbols: Vec::new(),
             symbol_registry: std::collections::HashMap::new(),
             well_known_symbols: std::collections::HashMap::new(),
+            jobs: VecDeque::new(),
         };
         builtins::install(&mut realm);
         realm
@@ -320,7 +326,12 @@ impl Realm {
         iterator
     }
 
-    pub fn native_function(&self, name: &str, length: u32, function: NativeFn) -> JsValue {
+    pub fn native_function(
+        &self,
+        name: &str,
+        length: u32,
+        function: impl Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue> + 'static,
+    ) -> JsValue {
         let function = Rc::new(JsFunction::native(name, length, function));
         JsValue::Object(self.function_object(function))
     }
@@ -384,6 +395,7 @@ impl Realm {
         let name = def.name.clone();
         let length = def.length;
         let is_arrow = def.is_arrow;
+        let constructable = !is_arrow && !def.is_async;
         let lexical_this = if is_arrow { this } else { None };
         let function = Rc::new(JsFunction {
             name,
@@ -396,7 +408,7 @@ impl Realm {
             instance_init,
         });
         let object = self.function_object(function);
-        if !is_arrow {
+        if constructable {
             let prototype = self.object();
             prototype.borrow_mut().define(
                 "constructor",
@@ -497,6 +509,27 @@ impl Realm {
     pub fn global_set(&self, key: &str, value: impl Into<JsValue>) {
         Object::from_ref(self.global.clone()).set(key, value);
     }
+
+    pub(crate) fn enqueue_job(&mut self, job: crate::vm::Job) {
+        self.jobs.push_back(job);
+    }
+
+    pub(crate) fn has_pending_job(&self) -> bool {
+        !self.jobs.is_empty()
+    }
+
+    /// QuickJS `JS_ExecutePendingJob` (quickjs.c:23952): run one queued job.
+    pub(crate) fn execute_pending_job(&mut self) -> Option<JsResult<()>> {
+        let job = self.jobs.pop_front()?;
+        Some(crate::vm::run_job(self, job))
+    }
+
+    pub(crate) fn drain_jobs(&mut self) -> JsResult<()> {
+        while let Some(result) = self.execute_pending_job() {
+            result?;
+        }
+        Ok(())
+    }
 }
 
 fn allocate(data: ObjectData) -> ObjRef {
@@ -553,10 +586,10 @@ pub struct Runtime {
 
 /// QuickJS `JS_NewRuntime` (quickjs.c:2430) equivalent.
 impl Runtime {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
             context: Context::new(),
-        }
+        })
     }
 
     pub fn context(&self) -> Context {
@@ -566,11 +599,23 @@ impl Runtime {
     pub fn eval(&self, source: &str) -> Result<JsValue> {
         self.context.eval(source)
     }
+
+    pub fn execute_pending_job(&self) -> Result<bool> {
+        self.context.execute_pending_job()
+    }
+
+    pub fn is_job_pending(&self) -> bool {
+        self.context.is_job_pending()
+    }
+
+    pub fn run_jobs(&self) -> Result<()> {
+        self.context.run_jobs()
+    }
 }
 
 impl Default for Runtime {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("runtime initialization")
     }
 }
 
@@ -584,6 +629,20 @@ impl Context {
         Self {
             realm: Rc::new(RefCell::new(Realm::new())),
         }
+    }
+
+    /// `rquickjs::Context::full`: create a context for a runtime.
+    pub fn full(runtime: &Runtime) -> Result<Self> {
+        Ok(runtime.context.clone())
+    }
+
+    /// Borrow the context for the lifetime of the callback. This is the
+    /// main entry point of the rquickjs-style API.
+    pub fn with<F, R>(&self, callback: F) -> R
+    where
+        F: for<'js> FnOnce(crate::api::Ctx<'js>) -> R,
+    {
+        callback(crate::api::Ctx::new(self))
     }
 
     /// QuickJS `JS_EvalInternal` (quickjs.c:1470) and `JS_EvalFunctionInternal`
@@ -602,15 +661,21 @@ impl Context {
         let mut realm = self.realm.borrow_mut();
         let env = Env::new(definition.env_size as usize, None);
         let global = realm.global.clone();
-        crate::vm::execute(&mut realm, &definition, env, JsValue::Object(global)).map_err(|value| {
+        let value = crate::vm::execute(&mut realm, definition, env, JsValue::Object(global))
+            .map_err(|value| {
+                let message = crate::vm::display_error(&realm, value.clone());
+                let mut error = Error::from_value(value, message);
+                if let Some(offset) = crate::vm::take_error_offset() {
+                    let (line, column) = line_column(source, offset);
+                    error = error.with_position(offset, line, column);
+                }
+                error
+            })?;
+        realm.drain_jobs().map_err(|value| {
             let message = crate::vm::display_error(&realm, value.clone());
-            let mut error = Error::from_value(value, message);
-            if let Some(offset) = crate::vm::take_error_offset() {
-                let (line, column) = line_column(source, offset);
-                error = error.with_position(offset, line, column);
-            }
-            error
-        })
+            Error::from_value(value, message)
+        })?;
+        Ok(value)
     }
 
     pub fn eval_file(&self, path: impl AsRef<std::path::Path>) -> Result<JsValue> {
@@ -631,7 +696,12 @@ impl Context {
         Object::from_ref(self.realm.borrow().array(items.into_iter().collect()))
     }
 
-    pub fn function(&self, name: &str, length: u32, function: NativeFn) -> Function {
+    pub fn function(
+        &self,
+        name: &str,
+        length: u32,
+        function: impl Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue> + 'static,
+    ) -> Function {
         let realm = self.realm.borrow();
         let value = realm.native_function(name, length, function);
         value.as_function().expect("native function")
@@ -656,6 +726,30 @@ impl Context {
     pub fn eval_value<T: crate::value::FromJs>(&self, source: &str) -> Result<T> {
         let value = self.eval(source)?;
         T::from_js(value).ok_or_else(|| Error::message("Unexpected JavaScript value type"))
+    }
+
+    pub fn execute_pending_job(&self) -> Result<bool> {
+        let mut realm = self.realm.borrow_mut();
+        match realm.execute_pending_job() {
+            None => Ok(false),
+            Some(Ok(())) => Ok(true),
+            Some(Err(value)) => {
+                let message = crate::vm::display_error(&realm, value.clone());
+                Err(Error::from_value(value, message))
+            }
+        }
+    }
+
+    pub fn is_job_pending(&self) -> bool {
+        self.realm.borrow().has_pending_job()
+    }
+
+    pub fn run_jobs(&self) -> Result<()> {
+        let mut realm = self.realm.borrow_mut();
+        realm.drain_jobs().map_err(|value| {
+            let message = crate::vm::display_error(&realm, value.clone());
+            Error::from_value(value, message)
+        })
     }
 }
 
