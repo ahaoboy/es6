@@ -340,10 +340,13 @@ impl<'js> Function<'js> {
     }
 
     pub fn call<R: FromJs>(&self, arguments: &[Value<'js>]) -> Result<R> {
-        self.call_with_this(&Value {
-            raw: JsValue::Undefined,
-            ctx: self.object.ctx,
-        }, arguments)
+        self.call_with_this(
+            &Value {
+                raw: JsValue::Undefined,
+                ctx: self.object.ctx,
+            },
+            arguments,
+        )
     }
 
     /// Call with an explicit receiver, like `js_call` with a `this` value

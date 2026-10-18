@@ -132,10 +132,16 @@ impl Punct {
 pub enum TokenKind {
     Eof,
     Ident(String),
+    /// Private class element name such as `#resolve`. The value is the internal
+    /// property key (`\0#resolve`) used by the object model.
+    PrivateIdent(String),
     Number(f64),
     String(String),
     Template(TemplateToken),
-    Regex { source: String, flags: String },
+    Regex {
+        source: String,
+        flags: String,
+    },
     Punct(Punct),
 }
 
@@ -174,6 +180,9 @@ impl Token {
         match &self.kind {
             TokenKind::Eof => "end of input".into(),
             TokenKind::Ident(value) => format!("`{value}`"),
+            TokenKind::PrivateIdent(value) => {
+                format!("`#{}`", value.trim_start_matches("\0#"))
+            }
             TokenKind::Number(value) => format!("number `{value}`"),
             TokenKind::String(_) => "string literal".into(),
             TokenKind::Template(_) => "template literal".into(),

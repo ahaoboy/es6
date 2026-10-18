@@ -1073,13 +1073,7 @@ impl Compiler {
             self.patch_jump(assign_jump, assign_target);
             self.emit(Op::Pop);
             self.emit(Op::Pop);
-            self.compile_member_store_value(
-                object_depth,
-                object_slot,
-                property,
-                key,
-                value,
-            )?;
+            self.compile_member_store_value(object_depth, object_slot, property, key, value)?;
             let end = self.position();
             self.patch_jump(end_jump, end);
         } else {
@@ -1090,13 +1084,7 @@ impl Compiler {
                 _ => unreachable!(),
             };
             self.emit(Op::Pop);
-            self.compile_member_store_value(
-                object_depth,
-                object_slot,
-                property,
-                key,
-                value,
-            )?;
+            self.compile_member_store_value(object_depth, object_slot, property, key, value)?;
             let end = self.position();
             self.patch_jump(keep_jump, end);
         }

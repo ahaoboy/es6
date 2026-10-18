@@ -3,6 +3,16 @@
 use super::*;
 
 impl<'a> Parser<'a> {
+    /// Consume an identifier or private name in property position.
+    fn property_name_token(&mut self) -> Option<String> {
+        let name = match &self.current.kind {
+            TokenKind::Ident(name) | TokenKind::PrivateIdent(name) => name.clone(),
+            _ => return None,
+        };
+        self.advance().ok()?;
+        Some(name)
+    }
+
     pub(super) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
         let first = self.parse_assignment()?;
         if !self.eat_punct(Punct::Comma)? {
@@ -371,16 +381,12 @@ impl<'a> Parser<'a> {
                         span,
                     };
                 } else {
-                    let name = match &self.current.kind {
-                        TokenKind::Ident(name) => name.clone(),
-                        _ => {
-                            return Err(self.error(format!(
-                                "Expected property name, found {}",
-                                self.current.description()
-                            )));
-                        }
-                    };
-                    self.advance()?;
+                    let name = self.property_name_token().ok_or_else(|| {
+                        self.error(format!(
+                            "Expected property name, found {}",
+                            self.current.description()
+                        ))
+                    })?;
                     let span = expression.span;
                     expression = Expr {
                         kind: ExprKind::Member {
@@ -394,16 +400,12 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.eat_punct(Punct::Dot)? {
-                let name = match &self.current.kind {
-                    TokenKind::Ident(name) => name.clone(),
-                    _ => {
-                        return Err(self.error(format!(
-                            "Expected property name, found {}",
-                            self.current.description()
-                        )));
-                    }
-                };
-                self.advance()?;
+                let name = self.property_name_token().ok_or_else(|| {
+                    self.error(format!(
+                        "Expected property name, found {}",
+                        self.current.description()
+                    ))
+                })?;
                 let span = expression.span;
                 expression = Expr {
                     kind: ExprKind::Member {
@@ -487,7 +489,12 @@ impl<'a> Parser<'a> {
         let mut callee = callee;
         loop {
             if self.eat_punct(Punct::Dot)? {
-                let name = self.binding_ident()?;
+                let name = self.property_name_token().ok_or_else(|| {
+                    self.error(format!(
+                        "Expected property name, found {}",
+                        self.current.description()
+                    ))
+                })?;
                 let span = callee.span;
                 callee = Expr {
                     kind: ExprKind::Member {
@@ -621,6 +628,16 @@ impl<'a> Parser<'a> {
                         quasis: template.quasis,
                         expressions,
                     },
+                    span,
+                })
+            }
+            TokenKind::PrivateIdent(name) => {
+                // A bare private name is only meaningful as the left operand
+                // of `#name in object`; lower it to its internal key.
+                let name = name.clone();
+                self.advance()?;
+                Ok(Expr {
+                    kind: ExprKind::Literal(Literal::String(name)),
                     span,
                 })
             }

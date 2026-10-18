@@ -297,6 +297,10 @@ pub enum Op {
     PushEnv(u16),
     PopEnv,
     Closure(u32),
+    /// `export * from "m"`: copy every own export of the module on top of the
+    /// stack into the exports object below it, skipping `default`
+    /// (`ExportEntriesForModule`, ES2022 16.2.3.5).
+    ExportAll,
     TryStart(usize),
     TryEnd,
     IterInit,

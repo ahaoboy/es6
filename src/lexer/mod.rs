@@ -50,6 +50,12 @@ impl<'a> Lexer<'a> {
             '.' if self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) => {
                 TokenKind::Number(self.read_number()?)
             }
+            '#' if self.peek_n(1).is_some_and(is_ident_start) => {
+                self.bump();
+                // A NUL prefix keeps private keys out of the ordinary string
+                // property namespace; `obj["#x"]` cannot alias `obj.#x`.
+                TokenKind::PrivateIdent(format!("\0#{}", self.read_identifier()?))
+            }
             _ if is_ident_start(ch) || ch == '\\' => TokenKind::Ident(self.read_identifier()?),
             _ => TokenKind::Punct(self.read_punct()?),
         };

@@ -97,7 +97,8 @@ impl<'a> Parser<'a> {
                     kind: ExprKind::Function(self.parse_function_declaration(false)?),
                     span: self.span(),
                 }
-            } else if self.current.is_ident("async") && self.peek().is_some_and(|t| t.is_ident("function"))
+            } else if self.current.is_ident("async")
+                && self.peek().is_some_and(|t| t.is_ident("function"))
             {
                 self.advance()?;
                 Expr {

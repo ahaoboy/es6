@@ -893,25 +893,25 @@ impl Context {
     /// Parse a JSON document with the realm's own parser.
     pub fn parse_json(&self, text: &str) -> Result<JsValue> {
         let mut realm = self.realm.borrow_mut();
-        crate::builtins::json::parse_json(
-            &mut realm,
-            &JsValue::Undefined,
-            &[JsValue::string(text)],
-        )
-        .map_err(|value| {
-            let message = crate::vm::display_error(&realm, value.clone());
-            Error::from_value(value, message)
-        })
+        crate::builtins::json::parse_json(&mut realm, &JsValue::Undefined, &[JsValue::string(text)])
+            .map_err(|value| {
+                let message = crate::vm::display_error(&realm, value.clone());
+                Error::from_value(value, message)
+            })
     }
 
     /// Serialize a value with the realm's `JSON.stringify`.
     pub fn to_json(&self, value: &JsValue) -> Result<JsValue> {
         let mut realm = self.realm.borrow_mut();
-        crate::builtins::json::stringify(&mut realm, &JsValue::Undefined, &[value.clone()])
-            .map_err(|value| {
-                let message = crate::vm::display_error(&realm, value.clone());
-                Error::from_value(value, message)
-            })
+        crate::builtins::json::stringify(
+            &mut realm,
+            &JsValue::Undefined,
+            std::slice::from_ref(value),
+        )
+        .map_err(|value| {
+            let message = crate::vm::display_error(&realm, value.clone());
+            Error::from_value(value, message)
+        })
     }
 
     pub fn global(&self) -> Object {

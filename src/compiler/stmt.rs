@@ -97,14 +97,9 @@ impl Compiler {
                         self.store_export(alias);
                     }
                     None => {
-                        // Object.assign(exports, require(source))
-                        let object = self.string_constant("Object");
-                        self.emit(Op::GetGlobal(object));
-                        self.emit_get_prop_const("assign");
                         self.emit_module_exports();
                         self.compile_require(source);
-                        self.emit(Op::Call(2));
-                        self.emit(Op::Pop);
+                        self.emit(Op::ExportAll);
                     }
                 }
             }

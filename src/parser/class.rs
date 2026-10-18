@@ -135,7 +135,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_property_name(&mut self) -> Result<PropertyName, ParseError> {
         match &self.current.kind {
-            TokenKind::Ident(name) => {
+            TokenKind::Ident(name) | TokenKind::PrivateIdent(name) => {
                 let name = name.clone();
                 self.advance()?;
                 Ok(PropertyName::Ident(name))

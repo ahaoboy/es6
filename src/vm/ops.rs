@@ -879,6 +879,28 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             let value = create_class(realm, &class, frame.env(), parent)?;
             frame.stack.push(value);
         }
+        Op::ExportAll => {
+            let source = pop(&mut frame.stack)?;
+            let target = pop(&mut frame.stack)?;
+            let (JsValue::Object(source), JsValue::Object(target)) = (source, target) else {
+                return Ok(Step::Continue);
+            };
+            let names: Vec<PropKey> = source.borrow().props.keys().cloned().collect();
+            let receiver = JsValue::Object(target.clone());
+            for key in names {
+                // `export *` never re-exports `default`.
+                if key == PropKey::from("default") {
+                    continue;
+                }
+                let value = source
+                    .borrow()
+                    .get_own_value(&key)
+                    .unwrap_or(JsValue::Undefined);
+                target
+                    .borrow_mut()
+                    .put_property(realm, key, value, &receiver)?;
+            }
+        }
         Op::SuperCall(argc) => {
             let arguments = pop_arguments(&mut frame.stack, argc as usize)?;
             let callee = frame
@@ -896,11 +918,7 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
                     .and_then(|object| object.to_ref().borrow().function())
                     .is_some_and(|function| function.has_super);
                 if !parent_is_derived {
-                    super::call::run_instance_initializer(
-                        realm,
-                        &parent,
-                        &frame.this,
-                    )?;
+                    super::call::run_instance_initializer(realm, &parent, &frame.this)?;
                 }
                 call_value(realm, parent.clone(), frame.this.clone(), &arguments)?;
                 // Fields declared by this class initialize after `super()`.
