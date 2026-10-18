@@ -814,15 +814,27 @@ impl Compiler {
     fn try_fused_member_read(&mut self, object: &Expr, name: &str) -> Option<bool> {
         match &object.kind {
             ExprKind::Ident(object_name) => {
-                let reference = self.resolve(object_name)?;
-                let key = self.string_constant(name);
-                let cache = self.add_prop_cache();
-                self.emit(Op::GetVarPropConst {
-                    depth: reference.depth,
-                    slot: reference.slot,
-                    key,
-                    cache,
-                });
+                if let Some(reference) = self.resolve(object_name) {
+                    let key = self.string_constant(name);
+                    let cache = self.add_prop_cache();
+                    self.emit(Op::GetVarPropConst {
+                        depth: reference.depth,
+                        slot: reference.slot,
+                        key,
+                        cache,
+                    });
+                } else {
+                    let global = self.string_constant(object_name);
+                    let key = self.string_constant(name);
+                    let global_cache = self.add_prop_cache();
+                    let prop_cache = self.add_prop_cache();
+                    self.emit(Op::GetGlobalPropConst {
+                        name: global,
+                        key,
+                        global_cache: global_cache as u16,
+                        prop_cache: prop_cache as u16,
+                    });
+                }
                 Some(true)
             }
             ExprKind::This => {

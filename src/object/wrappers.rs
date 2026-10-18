@@ -278,16 +278,41 @@ pub fn key_to_index(key: &str) -> Option<usize> {
 }
 
 pub fn utf16_len(value: &str) -> usize {
-    value.encode_utf16().count()
+    // ASCII maps one-to-one to UTF-16 code units; the check is vectorized
+    // and avoids decoding the whole string for the common case.
+    if value.is_ascii() {
+        value.len()
+    } else {
+        value.encode_utf16().count()
+    }
+}
+
+pub fn utf16_unit(value: &str, index: usize) -> Option<u16> {
+    if value.is_ascii() {
+        value.as_bytes().get(index).map(|byte| *byte as u16)
+    } else {
+        value.encode_utf16().nth(index)
+    }
 }
 
 pub fn utf16_char(value: &str, index: usize) -> Option<char> {
-    value.encode_utf16().nth(index).map(|unit| {
-        char::decode_utf16([unit])
-            .next()
-            .and_then(std::result::Result::ok)
-            .unwrap_or('\u{FFFD}')
-    })
+    let unit = utf16_unit(value, index)?;
+    char::decode_utf16([unit])
+        .next()
+        .and_then(std::result::Result::ok)
+        .or(Some('\u{FFFD}'))
+}
+
+/// Slice by UTF-16 code-unit indices. ASCII strings use a direct byte slice;
+/// other strings go through UTF-16 so code-unit semantics stay correct.
+pub fn utf16_slice(value: &str, start: usize, end: usize) -> String {
+    if value.is_ascii() {
+        return value.get(start..end).unwrap_or("").to_owned();
+    }
+    let units: Vec<u16> = value.encode_utf16().collect();
+    let start = start.min(units.len());
+    let end = end.min(units.len()).max(start);
+    String::from_utf16_lossy(&units[start..end])
 }
 
 impl PartialEq for PropKey {

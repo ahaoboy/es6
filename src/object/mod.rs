@@ -54,6 +54,16 @@ thread_local! {
 
 const TRANSITION_LIMIT: usize = 1 << 16;
 
+thread_local! {
+    /// Cached atom for the hot prototype key, so construction and function
+    /// initialization do not allocate a fresh property name.
+    static PROTOTYPE_KEY: PropKey = PropKey::Str(JsString::from("prototype"));
+}
+
+pub fn prototype_key() -> PropKey {
+    PROTOTYPE_KEY.with(Clone::clone)
+}
+
 pub fn empty_shape() -> Rc<Shape> {
     EMPTY_SHAPE.with(Rc::clone)
 }
@@ -78,6 +88,51 @@ fn add_transition(parent: &Rc<Shape>, key: PropKey) -> Rc<Shape> {
         map.insert((parent.id, key), child.clone());
         child
     })
+}
+
+impl PropCache {
+    #[inline]
+    pub fn poly_own(&self, shape: u64) -> Option<u32> {
+        self.own_shapes[..self.own_count as usize]
+            .iter()
+            .find(|(cached, _)| *cached == shape)
+            .map(|(_, slot)| *slot)
+    }
+
+    pub fn remember_own(&mut self, shape: u64, slot: u32) {
+        let count = self.own_count as usize;
+        for entry in &self.own_shapes[..count] {
+            if entry.0 == shape {
+                return;
+            }
+        }
+        if count < self.own_shapes.len() {
+            self.own_shapes[count] = (shape, slot);
+            self.own_count += 1;
+        } else {
+            self.own_shapes.copy_within(1.., 0);
+            self.own_shapes[self.own_shapes.len() - 1] = (shape, slot);
+        }
+    }
+
+    #[inline]
+    pub fn poly_proto(&self, shape: u64) -> bool {
+        self.proto_shapes[..self.proto_count as usize].contains(&shape)
+    }
+
+    pub fn remember_proto(&mut self, shape: u64) {
+        let count = self.proto_count as usize;
+        if self.proto_shapes[..count].contains(&shape) {
+            return;
+        }
+        if count < self.proto_shapes.len() {
+            self.proto_shapes[count] = shape;
+            self.proto_count += 1;
+        } else {
+            self.proto_shapes.copy_within(1.., 0);
+            self.proto_shapes[self.proto_shapes.len() - 1] = shape;
+        }
+    }
 }
 
 impl Shape {
@@ -138,15 +193,31 @@ pub struct PropCache {
     pub object_shape: u64,
     pub holder: Option<Weak<RefCell<ObjectData>>>,
     pub holder_shape: u64,
-    pub receiver_proto: Option<Weak<RefCell<ObjectData>>>,
+    /// Raw pointer identity of the receiver's prototype at cache time. The
+    /// receiver keeps it alive and prototype_generation guards chain
+    /// changes, so a hit only compares addresses.
+    pub receiver_proto: Option<usize>,
     pub prototype_generation: u64,
     pub index: u32,
     /// Shape before a new own property was inserted, used to define the same
     /// property on the next object of the same shape.
     pub insert_shape: u64,
+    /// Interned shape to install on the next insertion at this site and the
+    /// slot the new property takes, i.e. the cached shape transition that
+    /// QuickJS keeps in JSShape.transitions.
+    pub insert_target: Option<Rc<Shape>>,
+    pub insert_index: u32,
     pub can_insert: bool,
     pub own: bool,
     pub valid: bool,
+    /// Small polymorphic own-property cache. A shape id fully determines the
+    /// slot of this site's key, so entries never need invalidation.
+    pub own_shapes: [(u64, u32); 4],
+    pub own_count: u8,
+    /// Receiver shapes that were verified to reach the cached prototype
+    /// holder without an own property.
+    pub proto_shapes: [u64; 4],
+    pub proto_count: u8,
     /// The canonical key of this site, built once from the bytecode
     /// constant: repeated accesses clone the atom instead of re-parsing and
     /// re-canonicalizing the text (QuickJS interns atoms once the same way).

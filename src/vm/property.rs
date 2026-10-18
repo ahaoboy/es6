@@ -106,13 +106,43 @@ pub(crate) fn cached_get_const(
     if let JsValue::Object(object_ref) = object {
         let data = object_ref.borrow();
         let entry = cache.borrow();
-        if entry.valid
-            && entry.object_shape == data.shape_id()
-            && entry.own
-            && let Some(property) = data.props.get(entry.index as usize)
+        let shape = data.shape_id();
+        let cached = if let Some(slot) = entry.poly_own(shape) {
+            data.props
+                .get(slot as usize)
+                .map(|property| (property.value.clone(), property.get.as_deref().cloned()))
+        } else if entry.valid
+            && !entry.own
+            && (entry.object_shape == shape || entry.poly_proto(shape))
+            && entry.prototype_generation == crate::object::prototype_generation()
+            && data
+                .prototype
+                .as_ref()
+                .map(|proto| Rc::as_ptr(proto) as usize)
+                == entry.receiver_proto
         {
-            let getter = property.get.as_deref().cloned();
-            let value = property.value.clone();
+            entry
+                .holder
+                .as_ref()
+                .and_then(std::rc::Weak::upgrade)
+                .and_then(|holder| {
+                    let holder_data = holder.borrow();
+                    if holder_data.shape_id() == entry.holder_shape {
+                        holder_data.props.get(entry.index as usize).map(|property| {
+                            (property.value.clone(), property.get.as_deref().cloned())
+                        })
+                    } else {
+                        None
+                    }
+                })
+        } else if entry.valid && entry.own && entry.object_shape == shape {
+            data.props
+                .get(entry.index as usize)
+                .map(|property| (property.value.clone(), property.get.as_deref().cloned()))
+        } else {
+            None
+        };
+        if let Some((value, getter)) = cached {
             drop(entry);
             drop(data);
             return match getter {
@@ -139,10 +169,16 @@ pub(crate) fn cached_set_const(
     if let JsValue::Object(object_ref) = object {
         let mut data = object_ref.borrow_mut();
         let entry = cache.borrow();
-        if entry.valid
-            && entry.own
-            && entry.object_shape == data.shape_id()
-            && let Some(property) = data.props.get_mut(entry.index as usize)
+        let shape = data.shape_id();
+        let slot = if let Some(slot) = entry.poly_own(shape) {
+            Some(slot)
+        } else if entry.valid && entry.own && entry.object_shape == shape {
+            Some(entry.index)
+        } else {
+            None
+        };
+        if let Some(slot) = slot
+            && let Some(property) = data.props.get_mut(slot as usize)
         {
             if property.is_accessor() {
                 let setter = property.set.as_deref().cloned();
@@ -185,16 +221,11 @@ pub(crate) fn cached_get_property(
                     None
                 }
             } else if entry.prototype_generation == crate::object::prototype_generation()
-                && entry
-                    .receiver_proto
+                && data
+                    .prototype
                     .as_ref()
-                    .and_then(std::rc::Weak::upgrade)
-                    .is_some_and(|proto| {
-                        data.prototype
-                            .as_ref()
-                            .is_some_and(|value| Rc::ptr_eq(value, &proto))
-                    })
-                && data.lookup(key).is_none()
+                    .map(|proto| Rc::as_ptr(proto) as usize)
+                    == entry.receiver_proto
             {
                 entry
                     .holder
@@ -238,6 +269,7 @@ pub(crate) fn cached_get_property(
             entry.index = index;
             entry.own = true;
             entry.valid = true;
+            entry.remember_own(receiver.shape_id(), index);
         } else {
             let mut current = receiver.prototype.clone();
             while let Some(holder) = current {
@@ -251,11 +283,15 @@ pub(crate) fn cached_get_property(
                     entry.object_shape = receiver.shape_id();
                     entry.holder = Some(Rc::downgrade(&holder));
                     entry.holder_shape = shape;
-                    entry.receiver_proto = receiver.prototype.as_ref().map(Rc::downgrade);
+                    entry.receiver_proto = receiver
+                        .prototype
+                        .as_ref()
+                        .map(|proto| Rc::as_ptr(proto) as usize);
                     entry.prototype_generation = crate::object::prototype_generation();
                     entry.index = index;
                     entry.own = false;
                     entry.valid = true;
+                    entry.remember_proto(receiver.shape_id());
                     break;
                 }
                 current = next;
@@ -299,18 +335,31 @@ pub(crate) fn cached_set_property(
             } else if entry.can_insert
                 && data.extensible
                 && entry.insert_shape == data.shape_id()
-                && !data.has_property(key)
+                && entry.prototype_generation == crate::object::prototype_generation()
+                && let Some(target) = entry.insert_target.clone()
             {
-                data.define(key.clone(), Property::data(value.clone()));
-                drop(entry);
-                if let Some(index) = data.lookup(key) {
+                // Reuse the interned shape transition prepared by the first
+                // insertion at this site instead of hashing the key again.
+                let index = entry.insert_index;
+                if index as usize == data.props.len()
+                    && target.keys.len() == data.props.len() + 1
+                    && target.keys.get(index as usize) == Some(key)
+                {
+                    data.shape = target;
+                    if data.is_prototype {
+                        crate::object::bump_prototype_generation();
+                    }
+                    data.props.push(Property::data(value.clone()));
+                    let shape = data.shape_id();
+                    drop(entry);
                     let mut entry = cache.borrow_mut();
-                    entry.object_shape = data.shape_id();
+                    entry.object_shape = shape;
                     entry.index = index;
                     entry.own = true;
                     entry.valid = true;
+                    entry.remember_own(shape, index);
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
         drop(entry);
@@ -333,9 +382,13 @@ pub(crate) fn cached_set_property(
             entry.receiver_proto = None;
             entry.index = index;
             entry.insert_shape = shape_before;
+            entry.insert_target = (!had_own).then(|| data.shape.clone());
+            entry.insert_index = index;
+            entry.prototype_generation = crate::object::prototype_generation();
             entry.can_insert = !had_own;
             entry.own = true;
             entry.valid = true;
+            entry.remember_own(data.shape_id(), index);
         }
     }
     Ok(())
@@ -469,25 +522,29 @@ pub(crate) fn display_key(key: &PropKey) -> String {
 /// undefined values are cached like any other data property.
 pub(crate) fn cached_global_get(
     realm: &mut Realm,
-    name: &crate::string::JsString,
+    definition: &FunctionDef,
+    name_index: u32,
     cache: &std::cell::RefCell<PropCache>,
 ) -> JsResult<Option<JsValue>> {
-    let key = PropKey::Str(name.clone());
+    // The site's name is fixed by the bytecode and the shape id guarantees
+    // the same slot layout, so a hit needs neither the name constant nor a
+    // key comparison (QuickJS' global var cache does the same).
     {
         let global = realm.global.borrow();
         let entry = cache.borrow();
         if entry.valid
             && entry.object_shape == global.shape_id()
-            && global.shape.keys.get(entry.index as usize) == Some(&key)
             && let Some(property) = global.props.get(entry.index as usize)
             && !property.is_accessor()
         {
             return Ok(Some(property.value.clone()));
         }
     }
-    let value = global_get(realm, name)?;
+    let name = super::constant_string(definition, name_index);
+    let value = global_get(realm, &name)?;
     if value.is_some() {
         let global = realm.global.borrow();
+        let key = PropKey::Str(name);
         if let Some(index) = global.lookup(&key) {
             let mut entry = cache.borrow_mut();
             entry.object_shape = global.shape_id();

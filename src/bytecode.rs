@@ -189,6 +189,14 @@ pub enum Op {
         cache: u32,
         argc: u16,
     },
+    /// global.prop in one dispatch: the global read and the constant-key
+    /// property read each keep their own inline cache.
+    GetGlobalPropConst {
+        name: u32,
+        key: u32,
+        global_cache: u16,
+        prop_cache: u16,
+    },
     CallThisMethodConst {
         key: u32,
         cache: u32,

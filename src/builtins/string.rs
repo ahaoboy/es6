@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use super::*;
 use crate::coerce::{byte_to_utf16_offset, trim_ecma_whitespace, utf16_to_byte_offset};
-use crate::object::{RegExpData, utf16_char};
+use crate::object::{RegExpData, utf16_char, utf16_len, utf16_slice, utf16_unit};
 use crate::value::JsValue;
 
 /// QuickJS' `JS_STRING_LEN_MAX` (quickjs.c:222).
@@ -105,11 +105,11 @@ fn char_code_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsR
     if index < 0 {
         return Ok(JsValue::number(f64::NAN));
     }
-    Ok(value
-        .encode_utf16()
-        .nth(index as usize)
-        .map(|unit| JsValue::number(unit as f64))
-        .unwrap_or(JsValue::number(f64::NAN)))
+    Ok(
+        utf16_unit(&value, index as usize).map_or(JsValue::number(f64::NAN), |unit| {
+            JsValue::number(unit as f64)
+        }),
+    )
 }
 
 fn code_point_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
@@ -235,22 +235,18 @@ fn ends_with(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
 
 fn slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let units: Vec<u16> = value.encode_utf16().collect();
-    let length = units.len();
+    let length = utf16_len(&value);
     let start = normalize_index(arg_number_or(realm, arguments, 0, 0.0)?, length);
     let end = normalize_index(arg_number_or(realm, arguments, 1, length as f64)?, length);
     if start >= end {
         return Ok(JsValue::string(""));
     }
-    Ok(JsValue::string(String::from_utf16_lossy(
-        &units[start..end],
-    )))
+    Ok(JsValue::string(utf16_slice(&value, start, end)))
 }
 
 fn substring(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let units: Vec<u16> = value.encode_utf16().collect();
-    let length = units.len();
+    let length = utf16_len(&value);
     let mut start =
         to_integer(arg_number_or(realm, arguments, 0, 0.0)?).clamp(0, length as i64) as usize;
     let mut end = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
@@ -261,15 +257,12 @@ fn substring(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
     if start > end {
         std::mem::swap(&mut start, &mut end);
     }
-    Ok(JsValue::string(String::from_utf16_lossy(
-        &units[start..end],
-    )))
+    Ok(JsValue::string(utf16_slice(&value, start, end)))
 }
 
 fn substr(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let units: Vec<u16> = value.encode_utf16().collect();
-    let length = units.len();
+    let length = utf16_len(&value);
     let start = normalize_index(arg_number_or(realm, arguments, 0, 0.0)?, length);
     let count = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
         to_integer(arg_number(realm, arguments, 1)?).max(0) as usize
@@ -277,9 +270,7 @@ fn substr(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
         length - start
     };
     let end = (start + count).min(length);
-    Ok(JsValue::string(String::from_utf16_lossy(
-        &units[start..end],
-    )))
+    Ok(JsValue::string(utf16_slice(&value, start, end)))
 }
 
 fn to_upper_case(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
@@ -788,6 +779,12 @@ fn regexp_data(value: &JsValue) -> Option<Rc<RegExpData>> {
 }
 
 fn from_char_code(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
+    if let [argument] = arguments {
+        let number = crate::vm::to_number(realm, argument.clone())?;
+        let unit = crate::vm::to_uint32(number) as u16;
+        let ch = char::from_u32(unit as u32).unwrap_or('\u{FFFD}');
+        return Ok(JsValue::string(ch.to_string()));
+    }
     let mut units: Vec<u16> = Vec::with_capacity(arguments.len());
     for argument in arguments {
         let number = crate::vm::to_number(realm, argument.clone())?;

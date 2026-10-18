@@ -695,5 +695,9 @@ pub fn utf16_to_byte_offset(text: &str, unit_offset: usize) -> usize {
 
 /// Total UTF-16 length of a Rust string.
 pub fn utf16_length(text: &str) -> usize {
-    text.chars().map(char::len_utf16).sum()
+    if text.is_ascii() {
+        text.len()
+    } else {
+        text.chars().map(char::len_utf16).sum()
+    }
 }

@@ -168,11 +168,44 @@ pub fn construct_value(
     {
         return Err(realm.type_error("Value is not a constructor"));
     }
-    let prototype =
-        super::property::get_value_property(realm, &callee, &PropKey::from("prototype"))?;
-    let prototype = match prototype {
-        JsValue::Object(object) => object,
-        _ => realm.object_proto.clone(),
+    // Read the own prototype property directly with a cached atom instead
+    // of going through the generic property path (and allocating the name) on
+    // every construction.
+    let prototype = {
+        let key = crate::object::prototype_key();
+        let own = match &callee {
+            JsValue::Object(object_ref) => {
+                let data = object_ref.borrow();
+                data.get_own(&key)
+                    .map(|property| (property.is_accessor(), property.value.clone()))
+            }
+            _ => None,
+        };
+        match own {
+            Some((false, JsValue::Object(prototype))) => prototype,
+            Some((false, _)) => realm.object_proto.clone(),
+            Some((true, _)) => {
+                // An accessor prototype: follow the generic getter path.
+                match super::property::get_value_property(realm, &callee, &key)? {
+                    JsValue::Object(prototype) => prototype,
+                    _ => realm.object_proto.clone(),
+                }
+            }
+            None => {
+                if function.prototype.borrow().is_some() {
+                    // A deleted prototype falls back to %Object.prototype%.
+                    realm.object_proto.clone()
+                } else {
+                    let JsValue::Object(object_ref) = &callee else {
+                        unreachable!()
+                    };
+                    match realm.function_prototype(object_ref, &function) {
+                        JsValue::Object(prototype) => prototype,
+                        _ => realm.object_proto.clone(),
+                    }
+                }
+            }
+        }
     };
     if function.native.is_some() || function.native_data.is_some() {
         let this = JsValue::Object(Rc::new(RefCell::new(ObjectData::ordinary(Some(prototype)))));

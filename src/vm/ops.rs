@@ -260,12 +260,43 @@ pub(crate) fn execute_op(
             frame.set_var(depth, slot, value);
         }
         Op::GetGlobal { name, cache } => {
-            let name = constant_string(&frame.definition, name);
             let cache = &frame.definition.prop_caches[cache as usize];
-            match super::property::cached_global_get(realm, &name, cache)? {
+            match super::property::cached_global_get(realm, &frame.definition, name, cache)? {
                 Some(value) => frame.stack.push(value),
-                None => return Err(realm.reference_error(format!("{name} is not defined"))),
+                None => {
+                    let name = constant_string(&frame.definition, name);
+                    return Err(realm.reference_error(format!("{name} is not defined")));
+                }
             }
+        }
+        Op::GetGlobalPropConst {
+            name,
+            key,
+            global_cache,
+            prop_cache,
+        } => {
+            let global_cache = &frame.definition.prop_caches[global_cache as usize];
+            let object = match super::property::cached_global_get(
+                realm,
+                &frame.definition,
+                name,
+                global_cache,
+            )? {
+                Some(value) => value,
+                None => {
+                    let name = constant_string(&frame.definition, name);
+                    return Err(realm.reference_error(format!("{name} is not defined")));
+                }
+            };
+            let prop_cache = &frame.definition.prop_caches[prop_cache as usize];
+            let value = super::property::cached_get_const(
+                realm,
+                &object,
+                &frame.definition,
+                key,
+                prop_cache,
+            )?;
+            frame.stack.push(value);
         }
         Op::SetGlobal(index) => {
             let value = pop(&mut frame.stack)?;
@@ -1368,6 +1399,7 @@ fn binary_number(
     Ok(())
 }
 
+#[inline]
 fn binary_int(
     realm: &mut Realm,
     frame: &mut Frame,
@@ -1416,6 +1448,7 @@ fn compare_values(
     }))
 }
 
+#[inline]
 fn compare_op(
     realm: &mut Realm,
     frame: &mut Frame,
@@ -1478,6 +1511,7 @@ fn pop_array(stack: &mut ValueStack) -> JsResult<Vec<JsValue>> {
     }
 }
 
+#[inline]
 fn constant_value(
     realm: &mut Realm,
     definition: &FunctionDef,
