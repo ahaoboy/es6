@@ -119,7 +119,7 @@ impl From<JsValue> for Error {
 
 /// Global realm state. QuickJS separates `JSRuntime` (GC/atoms) from
 /// `JSContext` (global object/prototypes); Rust ownership makes one `Realm`
-/// sufficient. Initialization mirrors `JS_NewContextRaw` (quickjs.c:2892).
+/// sufficient. Initialization mirrors `JS_NewContextRaw` (quickjs.c:2846).
 pub struct Realm {
     pub global: ObjRef,
     pub object_proto: ObjRef,
@@ -150,7 +150,7 @@ pub struct Realm {
     pub well_known_symbols: std::collections::HashMap<&'static str, u32>,
     /// FIFO of promise/await jobs. QuickJS keeps the same list in
     /// `JSContext.job_list` and drains it with `JS_ExecutePendingJob`
-    /// (quickjs.c:23952).
+    /// (quickjs.c:2525).
     pub(crate) jobs: VecDeque<crate::vm::Job>,
     /// Recycled activation records, analogous to reusing `JSStackFrame`
     /// storage on QuickJS' value stack.
@@ -343,6 +343,32 @@ impl Realm {
         JsValue::Object(self.function_object(function))
     }
 
+    /// Create a function carrying a shared data cell that the GC can walk,
+    /// the equivalent of QuickJS C functions with data
+    /// (`js_c_function_data`, quickjs.c:6595).
+    pub fn native_function_data(
+        &self,
+        name: &str,
+        length: u32,
+        data: crate::object::NativeData,
+        function: impl Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue>
+            + 'static,
+    ) -> JsValue {
+        let function = Rc::new(JsFunction {
+            name: Rc::from(name),
+            length,
+            native: None,
+            native_data: Some(Rc::new(function)),
+            data,
+            def: None,
+            env: None,
+            bound: None,
+            lexical_this: None,
+            instance_init: None,
+        });
+        JsValue::Object(self.function_object(function))
+    }
+
     pub fn function_object(&self, function: Rc<JsFunction>) -> ObjRef {
         let object = allocate(ObjectData::new_function(function.clone()));
         {
@@ -402,12 +428,14 @@ impl Realm {
         let name = def.name.clone();
         let length = def.length;
         let is_arrow = def.is_arrow;
-        let constructable = !is_arrow && !def.is_async;
+        let constructable = !is_arrow && !def.is_async && !def.is_generator;
         let lexical_this = if is_arrow { this } else { None };
         let function = Rc::new(JsFunction {
             name,
             length,
             native: None,
+            native_data: None,
+            data: Rc::new(RefCell::new(Vec::new())),
             def: Some(def),
             env: Some(env),
             bound: None,
@@ -525,7 +553,7 @@ impl Realm {
         !self.jobs.is_empty()
     }
 
-    /// QuickJS `JS_ExecutePendingJob` (quickjs.c:23952): run one queued job.
+    /// QuickJS `JS_ExecutePendingJob` (quickjs.c:2525): run one queued job.
     pub(crate) fn execute_pending_job(&mut self) -> Option<JsResult<()>> {
         let job = self.jobs.pop_front()?;
         Some(crate::vm::run_job(self, job))
@@ -652,8 +680,9 @@ impl Context {
         callback(crate::api::Ctx::new(self))
     }
 
-    /// QuickJS `JS_EvalInternal` (quickjs.c:1470) and `JS_EvalFunctionInternal`
-    /// (quickjs.c:38108): parse, emit bytecode, then run the stack VM.
+    /// QuickJS `JS_EvalInternal` (quickjs.c:38266) and
+    /// `JS_EvalFunctionInternal` (quickjs.c:38108): parse, emit bytecode,
+    /// then run the stack VM.
     pub fn eval(&self, source: &str) -> Result<JsValue> {
         let program = parser::parse(source).map_err(|error| {
             Error::syntax(error.message, error.offset, error.line, error.column)

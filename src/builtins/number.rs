@@ -45,7 +45,7 @@ fn number(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
     let value = if arguments.is_empty() {
         0.0
     } else {
-        crate::vm::to_number(arg(arguments, 0))?
+        crate::vm::to_number(realm, arg(arguments, 0))?
     };
     if this.is_object() && !this.is_function() {
         return Ok(JsValue::Object(realm.boxed_number(value)));
@@ -134,7 +134,7 @@ fn parse_int(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsRes
         value = rest;
     }
     let mut radix = if arguments.len() > 1 {
-        crate::vm::to_uint32(arg_number(arguments, 1)?) as u32
+        crate::vm::to_uint32(arg_number(realm, arguments, 1)?) as u32
     } else {
         0
     };
@@ -181,7 +181,7 @@ fn to_string(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
     let radix = if arguments.is_empty() || arg(arguments, 0).is_undefined() {
         10
     } else {
-        crate::vm::to_uint32(arg_number(arguments, 0)?) as u32
+        crate::vm::to_uint32(arg_number(realm, arguments, 0)?) as u32
     };
     if !(2..=36).contains(&radix) {
         return Err(realm.range_error("toString() radix must be between 2 and 36"));
@@ -226,7 +226,7 @@ fn value_of(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResu
 
 fn to_fixed(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_number(realm, this)?;
-    let digits = to_integer(arg_number(arguments, 0).unwrap_or(0.0)).clamp(0, 100) as usize;
+    let digits = to_integer(arg_number(realm, arguments, 0).unwrap_or(0.0)).clamp(0, 100) as usize;
     Ok(JsValue::string(format!("{value:.digits$}")))
 }
 
@@ -238,7 +238,7 @@ fn to_exponential(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> J
     if arg(arguments, 0).is_undefined() {
         return Ok(JsValue::string(format!("{value:e}")));
     }
-    let digits = to_integer(arg_number(arguments, 0)?).clamp(0, 100) as usize;
+    let digits = to_integer(arg_number(realm, arguments, 0)?).clamp(0, 100) as usize;
     Ok(JsValue::string(format!("{value:.digits$e}")))
 }
 
@@ -247,6 +247,6 @@ fn to_precision(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsR
     if arg(arguments, 0).is_undefined() {
         return Ok(JsValue::string(crate::vm::format_number(value)));
     }
-    let precision = to_integer(arg_number(arguments, 0)?).clamp(1, 100) as usize;
+    let precision = to_integer(arg_number(realm, arguments, 0)?).clamp(1, 100) as usize;
     Ok(JsValue::string(format!("{value:.precision$}")))
 }

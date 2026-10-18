@@ -49,8 +49,22 @@ fn stringify(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsRes
 }
 
 fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<bool> {
+    // `toJSON` protocol first, exactly like `js_json_check` in QuickJS.
+    if let JsValue::Object(_) = value {
+        let method = crate::vm::get_value_property(
+            realm,
+            value,
+            &crate::object::PropKey::from("toJSON"),
+        )?;
+        if method.is_function() {
+            let result = crate::vm::call_value(realm, method, value.clone(), &[])?;
+            return to_json(realm, &result, output);
+        }
+    }
     match value {
-        JsValue::Undefined | JsValue::Null => {
+        // Top-level undefined is not serialized; array elements emit null.
+        JsValue::Undefined => Ok(false),
+        JsValue::Null => {
             output.push_str("null");
             Ok(true)
         }
@@ -76,6 +90,7 @@ fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<
             output.push_str(&quoted);
             Ok(true)
         }
+        // Functions and symbols are skipped in objects, `null` in arrays.
         JsValue::Symbol(_) => Ok(false),
         JsValue::Object(object) => {
             let data = object.borrow();
@@ -85,14 +100,45 @@ fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<
                     let items = array.items.clone();
                     drop(data);
                     output.push('[');
-                    for (index, item) in items.iter().enumerate() {
-                        if index > 0 {
+                    let mut first = true;
+                    for item in items.iter().flatten() {
+                        if !first {
                             output.push(',');
                         }
-                        let _ = to_json(realm, item, output)?;
+                        first = false;
+                        if !to_json(realm, item, output)? {
+                            // holes, undefined, symbols and functions
+                            output.push_str("null");
+                        }
+                    }
+                    // Dense prefix ends before `length`: trailing holes.
+                    let items_len = items.len();
+                    drop(items);
+                    let length = object.borrow().array_len().unwrap_or(items_len);
+                    for _ in items_len..length {
+                        if !first {
+                            output.push(',');
+                        }
+                        first = false;
+                        output.push_str("null");
                     }
                     output.push(']');
                     Ok(true)
+                }
+                ObjectKind::BoxedString(value) => {
+                    let text = value.clone();
+                    drop(data);
+                    to_json(realm, &JsValue::String(text), output)
+                }
+                ObjectKind::BoxedNumber(value) => {
+                    let number = *value;
+                    drop(data);
+                    to_json(realm, &JsValue::number(number), output)
+                }
+                ObjectKind::BoxedBool(value) => {
+                    let boolean = *value;
+                    drop(data);
+                    to_json(realm, &JsValue::Bool(boolean), output)
                 }
                 _ => {
                     let keys = data.enumerable_keys();
@@ -103,8 +149,9 @@ fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<
                         let Some(key_text) = key.to_rc_string() else {
                             continue;
                         };
-                        let item = crate::vm::get_value_property(realm, value, &key)?;
-                        if item.is_undefined() || item.is_function() {
+                        let item =
+                            crate::vm::get_value_property(realm, value, &key)?;
+                        if item.is_undefined() || item.is_function() || item.is_symbol() {
                             continue;
                         }
                         if !first {

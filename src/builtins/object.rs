@@ -85,7 +85,7 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
         JsValue::Object(value) => Ok(JsValue::Object(value)),
         JsValue::String(value) => Ok(JsValue::Object(realm.boxed_string(value))),
         JsValue::Int(_) | JsValue::Float(_) => {
-            let value = crate::vm::to_number(arg(arguments, 0))?;
+            let value = crate::vm::to_number(realm, arg(arguments, 0))?;
             Ok(JsValue::Object(realm.boxed_number(value)))
         }
         JsValue::Bool(value) => Ok(JsValue::Object(realm.boxed_bool(value))),

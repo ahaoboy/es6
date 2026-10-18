@@ -75,7 +75,7 @@ fn to_string(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsRes
 
 fn char_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let index = to_integer(arg_number(arguments, 0)?);
+    let index = to_integer(arg_number(realm, arguments, 0)?);
     if index < 0 {
         return Ok(JsValue::string(""));
     }
@@ -88,7 +88,7 @@ fn char_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult
 
 fn char_code_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let index = to_integer(arg_number(arguments, 0)?);
+    let index = to_integer(arg_number(realm, arguments, 0)?);
     if index < 0 {
         return Ok(JsValue::number(f64::NAN));
     }
@@ -101,7 +101,7 @@ fn char_code_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsR
 
 fn code_point_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let index = to_integer(arg_number(arguments, 0)?);
+    let index = to_integer(arg_number(realm, arguments, 0)?);
     if index < 0 {
         return Ok(JsValue::Undefined);
     }
@@ -115,7 +115,7 @@ fn code_point_at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> Js
 fn at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
     let chars: Vec<char> = value.chars().collect();
-    let index = to_integer(arg_number(arguments, 0)?);
+    let index = to_integer(arg_number(realm, arguments, 0)?);
     let index = if index < 0 {
         chars.len() as i64 + index
     } else {
@@ -131,7 +131,7 @@ fn at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsVa
 fn index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
     let search = crate::vm::to_string(realm, arg(arguments, 0))?;
-    let start = to_integer(arg_number(arguments, 1).unwrap_or(0.0)).max(0) as usize;
+    let start = to_integer(arg_number(realm, arguments, 1).unwrap_or(0.0)).max(0) as usize;
     if start > value.len() {
         return Ok(JsValue::number(-1.0));
     }
@@ -147,7 +147,7 @@ fn last_index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> Js
     let value = this_string(realm, this)?;
     let search = crate::vm::to_string(realm, arg(arguments, 0))?;
     let end = if arguments.len() > 1 {
-        to_integer(arg_number(arguments, 1)?).max(0) as usize
+        to_integer(arg_number(realm, arguments, 1)?).max(0) as usize
     } else {
         value.len()
     };
@@ -163,7 +163,7 @@ fn last_index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> Js
 fn includes(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
     let search = crate::vm::to_string(realm, arg(arguments, 0))?;
-    let start = to_integer(arg_number(arguments, 1).unwrap_or(0.0)).max(0) as usize;
+    let start = to_integer(arg_number(realm, arguments, 1).unwrap_or(0.0)).max(0) as usize;
     Ok(JsValue::Bool(
         start <= value.len() && value[start..].contains(&search),
     ))
@@ -172,7 +172,7 @@ fn includes(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
 fn starts_with(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
     let search = crate::vm::to_string(realm, arg(arguments, 0))?;
-    let start = to_integer(arg_number(arguments, 1).unwrap_or(0.0)).max(0) as usize;
+    let start = to_integer(arg_number(realm, arguments, 1).unwrap_or(0.0)).max(0) as usize;
     Ok(JsValue::Bool(
         start <= value.len() && value[start..].starts_with(&search),
     ))
@@ -182,7 +182,7 @@ fn ends_with(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
     let value = this_string(realm, this)?;
     let search = crate::vm::to_string(realm, arg(arguments, 0))?;
     let end = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
-        to_integer(arg_number(arguments, 1)?).clamp(0, value.len() as i64) as usize
+        to_integer(arg_number(realm, arguments, 1)?).clamp(0, value.len() as i64) as usize
     } else {
         value.len()
     };
@@ -192,8 +192,8 @@ fn ends_with(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
 fn slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value: Vec<char> = this_string(realm, this)?.chars().collect();
     let length = value.len();
-    let start = normalize_index(arg_number(arguments, 0)?, length);
-    let end = normalize_index(arg_number(arguments, 1).unwrap_or(length as f64), length);
+    let start = normalize_index(arg_number(realm, arguments, 0)?, length);
+    let end = normalize_index(arg_number(realm, arguments, 1).unwrap_or(length as f64), length);
     Ok(JsValue::string(
         value[if start < end { start } else { end }..end.max(start)]
             .iter()
@@ -204,9 +204,9 @@ fn slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<J
 fn substring(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value: Vec<char> = this_string(realm, this)?.chars().collect();
     let length = value.len();
-    let mut start = to_integer(arg_number(arguments, 0)?).clamp(0, length as i64) as usize;
+    let mut start = to_integer(arg_number(realm, arguments, 0)?).clamp(0, length as i64) as usize;
     let mut end = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
-        to_integer(arg_number(arguments, 1)?).clamp(0, length as i64) as usize
+        to_integer(arg_number(realm, arguments, 1)?).clamp(0, length as i64) as usize
     } else {
         length
     };
@@ -221,9 +221,9 @@ fn substring(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
 fn substr(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value: Vec<char> = this_string(realm, this)?.chars().collect();
     let length = value.len();
-    let start = normalize_index(arg_number(arguments, 0)?, length);
+    let start = normalize_index(arg_number(realm, arguments, 0)?, length);
     let count = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
-        arg_number(arguments, 1)?.max(0.0) as usize
+        arg_number(realm, arguments, 1)?.max(0.0) as usize
     } else {
         length - start
     };
@@ -264,7 +264,7 @@ fn concat(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
 
 fn repeat(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let count = arg_number(arguments, 0)?.max(0.0) as usize;
+    let count = arg_number(realm, arguments, 0)?.max(0.0) as usize;
     Ok(JsValue::string(value.repeat(count)))
 }
 
@@ -278,7 +278,7 @@ fn pad_end(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult
 
 fn pad(realm: &mut Realm, this: &JsValue, arguments: &[JsValue], start: bool) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    let target = arg_number(arguments, 0)?.max(0.0) as usize;
+    let target = arg_number(realm, arguments, 0)?.max(0.0) as usize;
     let fill = if arguments.len() > 1 && !arg(arguments, 1).is_undefined() {
         crate::vm::to_string(realm, arg(arguments, 1))?
     } else {
@@ -305,7 +305,7 @@ fn split(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<J
     let value = this_string(realm, this)?;
     let separator = arg(arguments, 0);
     let limit = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
-        crate::vm::to_uint32(arg_number(arguments, 1)?.max(0.0)) as usize
+        crate::vm::to_uint32(arg_number(realm, arguments, 1)?.max(0.0)) as usize
     } else {
         usize::MAX
     };
@@ -586,7 +586,7 @@ fn regexp_data(value: &JsValue) -> Option<Rc<RegExpData>> {
 fn from_char_code(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let mut result = String::new();
     for argument in arguments {
-        let unit = crate::vm::to_uint32(arg_number(std::slice::from_ref(argument), 0)?) & 0xFFFF;
+        let unit = crate::vm::to_uint32(arg_number(realm, std::slice::from_ref(argument), 0)?) & 0xFFFF;
         if let Some(ch) = char::from_u32(unit) {
             result.push(ch);
         }
@@ -598,7 +598,7 @@ fn from_char_code(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> 
 fn from_code_point(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let mut result = String::new();
     for argument in arguments {
-        let value = arg_number(std::slice::from_ref(argument), 0)?;
+        let value = arg_number(realm, std::slice::from_ref(argument), 0)?;
         if !(0.0..=0x10FFFF as f64).contains(&value) {
             return Err(realm.range_error("Invalid code point"));
         }

@@ -22,6 +22,7 @@ mod set;
 mod string;
 mod symbol;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::object::{
@@ -56,8 +57,8 @@ pub(crate) fn arg(arguments: &[JsValue], index: usize) -> JsValue {
     arguments.get(index).cloned().unwrap_or(JsValue::Undefined)
 }
 
-pub(crate) fn arg_number(arguments: &[JsValue], index: usize) -> JsResult<f64> {
-    crate::vm::to_number(arg(arguments, index))
+pub(crate) fn arg_number(realm: &mut Realm, arguments: &[JsValue], index: usize) -> JsResult<f64> {
+    crate::vm::to_number(realm, arg(arguments, index))
 }
 
 pub(crate) fn define_value(target: &ObjRef, name: &str, value: impl Into<JsValue>) {
@@ -191,7 +192,12 @@ pub(crate) fn array_items(realm: &mut Realm, object: &Object) -> JsResult<Vec<Js
     let data = object.to_ref();
     let data = data.borrow();
     if let ObjectKind::Array(array) = &data.kind {
-        return Ok(array.items.clone());
+        // Dense elements flattened; holes read as `undefined`.
+        return Ok(array
+            .items
+            .iter()
+            .map(|item| item.clone().unwrap_or(JsValue::Undefined))
+            .collect());
     }
     drop(data);
     let length_value = crate::vm::get_value_property(
@@ -199,7 +205,7 @@ pub(crate) fn array_items(realm: &mut Realm, object: &Object) -> JsResult<Vec<Js
         &JsValue::Object(object.to_ref()),
         &PropKey::from("length"),
     )?;
-    let length = crate::vm::to_uint32(crate::vm::to_number(length_value)?) as usize;
+    let length = crate::vm::to_uint32(crate::vm::to_number(realm, length_value)?) as usize;
     let mut items = Vec::with_capacity(length);
     for index in 0..length {
         items.push(crate::vm::get_value_property(
@@ -216,7 +222,7 @@ pub(crate) fn set_array_items(realm: &mut Realm, object: &Object, items: Vec<JsV
     let reference = object.to_ref();
     let mut data = reference.borrow_mut();
     if let ObjectKind::Array(array) = &mut data.kind {
-        array.items = items;
+        array.items = items.into_iter().map(Some).collect();
         array.length = length;
         return;
     }
@@ -251,6 +257,8 @@ pub(crate) fn bound_function(
         name: Rc::from(name),
         length,
         native: None,
+        native_data: None,
+        data: Rc::new(RefCell::new(Vec::new())),
         def: None,
         env: None,
         bound: Some(crate::object::BoundFunction {
@@ -326,6 +334,7 @@ pub(crate) fn object_kind_name(object: &ObjectData) -> &'static str {
         ObjectKind::TypedArray(data) => data.kind.name(),
         ObjectKind::Error => "Error",
         ObjectKind::Iterator { .. } => "Iterator",
+        ObjectKind::AsyncFrame(_) => "AsyncFunction",
         ObjectKind::Ordinary => "Object",
     }
 }

@@ -14,7 +14,7 @@ pub type EnvRef = Rc<Env>;
 
 /// Lexical environment frame. QuickJS represents the same chain with
 /// `JSVarRef`/`JSFunctionBytecode.closure_var` and resolves `(depth, slot)`
-/// references while walking `JSStackFrame.var_refs` (quickjs.c:963).
+/// references while walking `JSStackFrame.var_refs` (quickjs.c:427).
 pub struct Env {
     pub slots: RefCell<Vec<JsValue>>,
     pub parent: Option<EnvRef>,
@@ -196,6 +196,8 @@ impl JsValue {
             name: def.name.clone(),
             length: def.length,
             native: None,
+            native_data: None,
+            data: Rc::new(RefCell::new(Vec::new())),
             def: Some(def),
             env: Some(env),
             bound: None,

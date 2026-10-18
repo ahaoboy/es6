@@ -29,25 +29,53 @@ pub struct ClassMethod {
 }
 
 /// Compiled function body. QuickJS stores the same information in
-/// `JSFunctionBytecode` (quickjs.c:17200 area) with `byte_code_buf`,
-/// `cpool` and `closure_var`.
+/// `JSFunctionBytecode` (quickjs.c:855) with `byte_code_buf`, `cpool` and
+/// `closure_var`.
 pub struct FunctionDef {
     pub name: Rc<str>,
     pub code: Vec<Op>,
-    /// Source byte offset for each opcode, used for diagnostics.
+    /// Source byte offset for each opcode, used for diagnostics. QuickJS
+    /// builds the equivalent `pc2line` table in `resolve_labels`
+    /// (quickjs.c:35751).
     pub positions: Vec<u32>,
     pub constants: Vec<Constant>,
     pub prop_caches: Vec<RefCell<crate::object::PropCache>>,
     pub env_size: u16,
     /// True when this function creates closures/classes that can capture its
     /// frame. QuickJS likewise only materializes `var_refs` for captured
-    /// variables; uncaptured locals stay in stack slots (`JSStackFrame`).
+    /// variables; uncaptured locals stay in stack slots (`JSStackFrame`,
+    /// quickjs.c:427).
     pub use_env: bool,
     pub length: u32,
     pub is_arrow: bool,
     pub is_async: bool,
+    pub is_generator: bool,
     pub strict: bool,
     pub source: String,
+}
+
+impl FunctionDef {
+    /// Shared placeholder used by recycled activation records.
+    pub fn empty() -> Rc<Self> {
+        thread_local! {
+            static EMPTY: Rc<FunctionDef> = Rc::new(FunctionDef {
+                name: Rc::from(""),
+                code: Vec::new(),
+                positions: Vec::new(),
+                constants: Vec::new(),
+                prop_caches: Vec::new(),
+                env_size: 0,
+                use_env: false,
+                length: 0,
+                is_arrow: false,
+                is_async: false,
+                is_generator: false,
+                strict: false,
+                source: String::new(),
+            });
+        }
+        EMPTY.with(|empty| empty.clone())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

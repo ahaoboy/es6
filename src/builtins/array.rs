@@ -134,9 +134,9 @@ fn slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<J
     let object = array_object(realm, this)?;
     let items = array_items(realm, &object)?;
     let length = items.len();
-    let start = normalize_index(arg_number(arguments, 0)?, length);
+    let start = normalize_index(arg_number(realm, arguments, 0)?, length);
     let end = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
-        normalize_index(arg_number(arguments, 1)?, length)
+        normalize_index(arg_number(realm, arguments, 1)?, length)
     } else {
         length
     };
@@ -152,11 +152,11 @@ fn splice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
     let object = array_object(realm, this)?;
     let mut items = array_items(realm, &object)?;
     let length = items.len();
-    let start = normalize_index(arg_number(arguments, 0)?, length);
+    let start = normalize_index(arg_number(realm, arguments, 0)?, length);
     let delete_count = if arguments.len() < 2 {
         length.saturating_sub(start)
     } else {
-        (arg_number(arguments, 1)?.max(0.0) as usize).min(length - start)
+        (arg_number(realm, arguments, 1)?.max(0.0) as usize).min(length - start)
     };
     let removed: Vec<JsValue> = items
         .splice(
@@ -210,7 +210,7 @@ fn index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
     let object = array_object(realm, this)?;
     let items = array_items(realm, &object)?;
     let target = arg(arguments, 0);
-    let start = normalize_index(arg_number(arguments, 1).unwrap_or(0.0), items.len());
+    let start = normalize_index(arg_number(realm, arguments, 1).unwrap_or(0.0), items.len());
     for (index, item) in items.iter().enumerate().skip(start) {
         if crate::vm::strict_equals(item, &target) {
             return Ok(JsValue::number(index as f64));
@@ -224,7 +224,7 @@ fn last_index_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> Js
     let items = array_items(realm, &object)?;
     let target = arg(arguments, 0);
     let start = if arguments.len() > 1 {
-        normalize_index(arg_number(arguments, 1)?, items.len())
+        normalize_index(arg_number(realm, arguments, 1)?, items.len())
     } else {
         items.len().saturating_sub(1)
     };
@@ -240,7 +240,7 @@ fn includes(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
     let object = array_object(realm, this)?;
     let items = array_items(realm, &object)?;
     let target = arg(arguments, 0);
-    let start = normalize_index(arg_number(arguments, 1).unwrap_or(0.0), items.len());
+    let start = normalize_index(arg_number(realm, arguments, 1).unwrap_or(0.0), items.len());
     for item in items.iter().skip(start) {
         if crate::vm::strict_equals(item, &target)
             || (item.is_number() && target.is_number() && {
@@ -499,9 +499,9 @@ fn fill(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
     let object = array_object(realm, this)?;
     let mut items = array_items(realm, &object)?;
     let value = arg(arguments, 0);
-    let start = normalize_index(arg_number(arguments, 1).unwrap_or(0.0), items.len());
+    let start = normalize_index(arg_number(realm, arguments, 1).unwrap_or(0.0), items.len());
     let end = normalize_index(
-        arg_number(arguments, 2).unwrap_or(items.len() as f64),
+        arg_number(realm, arguments, 2).unwrap_or(items.len() as f64),
         items.len(),
     );
     for item in &mut items[start..end] {
@@ -515,9 +515,9 @@ fn copy_within(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsRe
     let object = array_object(realm, this)?;
     let mut items = array_items(realm, &object)?;
     let length = items.len();
-    let target = normalize_index(arg_number(arguments, 0)?, length);
-    let start = normalize_index(arg_number(arguments, 1)?, length);
-    let end = normalize_index(arg_number(arguments, 2).unwrap_or(length as f64), length);
+    let target = normalize_index(arg_number(realm, arguments, 0)?, length);
+    let start = normalize_index(arg_number(realm, arguments, 1)?, length);
+    let end = normalize_index(arg_number(realm, arguments, 2).unwrap_or(length as f64), length);
     let count = (end.saturating_sub(start)).min(length.saturating_sub(target));
     let source: Vec<JsValue> = items[start..start + count].to_vec();
     items[target..target + count].clone_from_slice(&source);
@@ -550,7 +550,7 @@ fn flat(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
     let depth = if arg(arguments, 0).is_undefined() {
         1
     } else {
-        arg_number(arguments, 0)?.max(0.0) as usize
+        arg_number(realm, arguments, 0)?.max(0.0) as usize
     };
     let items = array_items(realm, &object)?;
     Ok(JsValue::Object(realm.array(flatten(items, depth))))
@@ -577,7 +577,7 @@ fn flat_map(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
 fn at(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = array_object(realm, this)?;
     let items = array_items(realm, &object)?;
-    let index = to_integer(arg_number(arguments, 0)?);
+    let index = to_integer(arg_number(realm, arguments, 0)?);
     let index = if index < 0 {
         items.len() as i64 + index
     } else {

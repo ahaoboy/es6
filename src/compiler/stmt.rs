@@ -1,0 +1,736 @@
+//! Statement compilation: control flow, loops, try/catch and switch.
+//!
+//! Counterpart of js_parse_statement_or_decl (quickjs.c:29374) lowering.
+
+use super::*;
+
+impl Compiler {
+    pub(super) fn compile_statement(&mut self, statement: &Stmt) -> Result<(), ParseError> {
+        self.span = statement.span;
+        match &statement.kind {
+            StmtKind::Empty | StmtKind::Debugger => {}
+            StmtKind::Expr(expression) => {
+                self.compile_expr(expression)?;
+                self.emit(Op::Pop);
+            }
+            StmtKind::Block(statements) => {
+                self.compile_block(statements)?;
+            }
+            StmtKind::Var(declaration) => {
+                self.compile_var_declaration(declaration)?;
+            }
+            StmtKind::Function(function) => {
+                let def = self.compile_function(function, false, false)?;
+                let constant = self.add_constant(Constant::Function(def));
+                self.emit(Op::Closure(constant));
+                if let Some(name) = &function.name {
+                    self.store_ident(name, BindingMode::Auto);
+                } else {
+                    self.emit(Op::Pop);
+                }
+            }
+            StmtKind::Class(class) => {
+                self.compile_class(class)?;
+                if let Some(name) = &class.name {
+                    self.store_ident(name, BindingMode::Auto);
+                } else {
+                    self.emit(Op::Pop);
+                }
+            }
+            StmtKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                self.compile_expr(test)?;
+                let else_jump = self.emit_jump(Op::JumpIfFalse(0));
+                self.compile_stmt_or_block(consequent)?;
+                if let Some(alternate) = alternate {
+                    let end_jump = self.emit_jump(Op::Jump(0));
+                    let else_target = self.position();
+                    self.patch_jump(else_jump, else_target);
+                    self.compile_stmt_or_block(alternate)?;
+                    let end = self.position();
+                    self.patch_jump(end_jump, end);
+                } else {
+                    let end = self.position();
+                    self.patch_jump(else_jump, end);
+                }
+            }
+            StmtKind::While { test, body } => {
+                self.compile_while(test, body)?;
+            }
+            StmtKind::DoWhile { body, test } => {
+                self.compile_do_while(body, test)?;
+            }
+            StmtKind::For {
+                init,
+                test,
+                update,
+                body,
+            } => {
+                self.compile_for(init, test, update, body)?;
+            }
+            StmtKind::ForIn { left, right, body } => {
+                self.compile_for_in_of(left, right, body, true, false)?;
+            }
+            StmtKind::ForOf { left, right, body } => {
+                self.compile_for_in_of(left, right, body, false, false)?;
+            }
+            StmtKind::Return(argument) => {
+                if let Some(argument) = argument {
+                    self.compile_expr(argument)?;
+                    self.emit_active_finalizers()?;
+                    self.emit(Op::Return);
+                } else {
+                    self.emit_active_finalizers()?;
+                    self.emit(Op::ReturnUndefined);
+                }
+            }
+            StmtKind::Break(label) => {
+                self.compile_break(label.as_deref())?;
+            }
+            StmtKind::Continue(label) => {
+                self.compile_continue(label.as_deref())?;
+            }
+            StmtKind::Throw(expression) => {
+                self.compile_expr(expression)?;
+                self.emit(Op::Throw);
+            }
+            StmtKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                self.compile_try(block, handler.as_ref(), finalizer.as_deref())?;
+            }
+            StmtKind::Switch {
+                discriminant,
+                cases,
+            } => {
+                self.compile_switch(discriminant, cases)?;
+            }
+            StmtKind::Labeled { label, body } => {
+                let context = BreakContext {
+                    label: Some(label.clone()),
+                    env_depth: self.local_frames.len(),
+                    stack_cleanup: 0,
+                    try_depth: self.try_depth,
+                    jumps: Vec::new(),
+                };
+                self.breakables.push(context);
+                self.compile_statement(body)?;
+                let context = self.breakables.pop().unwrap();
+                let end = self.position();
+                for jump in context.jumps {
+                    self.patch_jump(jump, end);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_stmt_or_block(&mut self, statement: &Stmt) -> Result<(), ParseError> {
+        self.compile_statement(statement)
+    }
+
+    pub(super) fn compile_block(&mut self, statements: &[Stmt]) -> Result<(), ParseError> {
+        let names = collect_direct_bindings(statements);
+        if names.is_empty() {
+            self.hoist_functions(statements, false)?;
+            for statement in statements {
+                if matches!(statement.kind, StmtKind::Function(_)) {
+                    continue;
+                }
+                self.compile_statement(statement)?;
+            }
+            return Ok(());
+        }
+        let mut frame = ScopeFrame::new();
+        for name in &names {
+            frame.declare(name);
+        }
+        let size = frame.size;
+        self.local_frames.push(frame);
+        self.emit(Op::PushEnv(size));
+        self.hoist_functions(statements, false)?;
+        for statement in statements {
+            if matches!(statement.kind, StmtKind::Function(_)) {
+                continue;
+            }
+            self.compile_statement(statement)?;
+        }
+        self.emit(Op::PopEnv);
+        self.local_frames.pop();
+        Ok(())
+    }
+
+    pub(super) fn compile_var_declaration(&mut self, declaration: &VarDecl) -> Result<(), ParseError> {
+        for declarator in &declaration.declarations {
+            // `var x;` is fully handled by hoisting. In particular it must not
+            // overwrite a parameter binding with the same name.
+            if declarator.init.is_none() && declaration.kind == VarKind::Var {
+                continue;
+            }
+            if let Some(init) = &declarator.init {
+                self.compile_expr(init)?;
+            } else {
+                self.emit(Op::Undefined);
+            }
+            if declaration.kind == VarKind::Var && self.lookup_global_mode() {
+                self.bind_pattern(&declarator.pattern, BindingMode::Global)?;
+            } else {
+                self.bind_pattern(&declarator.pattern, BindingMode::Auto)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_while(&mut self, test: &Expr, body: &Stmt) -> Result<(), ParseError> {
+        let start = self.position();
+        self.compile_expr(test)?;
+        let end_jump = self.emit_jump(Op::JumpIfFalse(0));
+        let break_context = BreakContext {
+            label: None,
+            env_depth: self.local_frames.len(),
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            jumps: Vec::new(),
+        };
+        let loop_context = LoopContext {
+            label: None,
+            env_depth: self.local_frames.len(),
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            continue_target: Some(start),
+            continue_jumps: Vec::new(),
+        };
+        self.breakables.push(break_context);
+        self.loops.push(loop_context);
+        self.compile_statement(body)?;
+        let loop_context = self.loops.pop().unwrap();
+        let break_context = self.breakables.pop().unwrap();
+        self.emit(Op::Jump(start));
+        let end = self.position();
+        self.patch_jump(end_jump, end);
+        for jump in break_context.jumps {
+            self.patch_jump(jump, end);
+        }
+        for jump in loop_context.continue_jumps {
+            self.patch_jump(jump, start);
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_do_while(&mut self, body: &Stmt, test: &Expr) -> Result<(), ParseError> {
+        let start = self.position();
+        let break_context = BreakContext {
+            label: None,
+            env_depth: self.local_frames.len(),
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            jumps: Vec::new(),
+        };
+        let loop_context = LoopContext {
+            label: None,
+            env_depth: self.local_frames.len(),
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            continue_target: None,
+            continue_jumps: Vec::new(),
+        };
+        self.breakables.push(break_context);
+        self.loops.push(loop_context);
+        self.compile_statement(body)?;
+        let continue_target = self.position();
+        self.compile_expr(test)?;
+        self.emit(Op::JumpIfTrue(start));
+        let loop_context = self.loops.pop().unwrap();
+        let break_context = self.breakables.pop().unwrap();
+        let end = self.position();
+        for jump in break_context.jumps {
+            self.patch_jump(jump, end);
+        }
+        for jump in loop_context.continue_jumps {
+            self.patch_jump(jump, continue_target);
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_for(
+        &mut self,
+        init: &Option<ForInit>,
+        test: &Option<Expr>,
+        update: &Option<Expr>,
+        body: &Stmt,
+    ) -> Result<(), ParseError> {
+        let lexical = matches!(
+            init,
+            Some(ForInit::Var(declaration)) if declaration.kind != VarKind::Var
+        );
+        if lexical {
+            let declaration = match init {
+                Some(ForInit::Var(declaration)) => declaration,
+                _ => unreachable!(),
+            };
+            let mut frame = ScopeFrame::new();
+            for declarator in &declaration.declarations {
+                for name in pattern_names(&declarator.pattern) {
+                    frame.declare(&name);
+                }
+            }
+            let size = frame.size;
+            let bindings = frame.bindings.clone();
+            self.local_frames.push(frame);
+            self.emit(Op::PushEnv(size));
+            self.compile_var_declaration(declaration)?;
+            let loop_depth = self.local_frames.len();
+
+            let start = self.position();
+            let mut iteration = ScopeFrame::new();
+            iteration.bindings = bindings.clone();
+            iteration.size = size;
+            self.local_frames.push(iteration);
+            self.emit(Op::PushEnv(size));
+            for slot in bindings.values() {
+                self.emit(Op::GetVar {
+                    depth: 1,
+                    slot: *slot,
+                });
+                self.emit(Op::SetVar {
+                    depth: 0,
+                    slot: *slot,
+                });
+            }
+            let end_jump = if let Some(test) = test {
+                self.compile_expr(test)?;
+                Some(self.emit_jump(Op::JumpIfFalse(0)))
+            } else {
+                None
+            };
+            let break_context = BreakContext {
+                label: None,
+                env_depth: loop_depth,
+                stack_cleanup: 0,
+                try_depth: self.try_depth,
+                jumps: Vec::new(),
+            };
+            let loop_context = LoopContext {
+                label: None,
+                env_depth: self.local_frames.len(),
+                stack_cleanup: 0,
+                try_depth: self.try_depth,
+                continue_target: None,
+                continue_jumps: Vec::new(),
+            };
+            self.breakables.push(break_context);
+            self.loops.push(loop_context);
+            self.compile_statement(body)?;
+            let continue_target = self.position();
+            if let Some(update) = update {
+                self.compile_expr(update)?;
+                self.emit(Op::Pop);
+            }
+            for slot in bindings.values() {
+                self.emit(Op::GetVar {
+                    depth: 0,
+                    slot: *slot,
+                });
+                self.emit(Op::SetVar {
+                    depth: 1,
+                    slot: *slot,
+                });
+            }
+            self.emit(Op::PopEnv);
+            self.local_frames.pop();
+            self.emit(Op::Jump(start));
+            let loop_context = self.loops.pop().unwrap();
+            let break_context = self.breakables.pop().unwrap();
+            let exit = self.position();
+            if let Some(jump) = end_jump {
+                self.patch_jump(jump, exit);
+            }
+            self.emit(Op::PopEnv);
+            let end = self.position();
+            for jump in break_context.jumps {
+                self.patch_jump(jump, end);
+            }
+            for jump in loop_context.continue_jumps {
+                self.patch_jump(jump, continue_target);
+            }
+            self.emit(Op::PopEnv);
+            self.local_frames.pop();
+            return Ok(());
+        }
+
+        match init {
+            Some(ForInit::Var(declaration)) => self.compile_var_declaration(declaration)?,
+            Some(ForInit::Expr(expression)) => {
+                self.compile_expr(expression)?;
+                self.emit(Op::Pop);
+            }
+            None => {}
+        }
+        let start = self.position();
+        let end_jump = if let Some(test) = test {
+            self.compile_expr(test)?;
+            Some(self.emit_jump(Op::JumpIfFalse(0)))
+        } else {
+            None
+        };
+        let break_context = BreakContext {
+            label: None,
+            env_depth: self.local_frames.len(),
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            jumps: Vec::new(),
+        };
+        let loop_context = LoopContext {
+            label: None,
+            env_depth: self.local_frames.len(),
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            continue_target: None,
+            continue_jumps: Vec::new(),
+        };
+        self.breakables.push(break_context);
+        self.loops.push(loop_context);
+        self.compile_statement(body)?;
+        let continue_target = self.position();
+        let mut jumped = false;
+        if let Some(update) = update
+            && let ExprKind::Update { op, argument, .. } = &update.kind
+            && let ExprKind::Ident(name) = &argument.kind
+            && let Some(reference) = self.resolve(name)
+        {
+            self.emit(Op::UpdateVarJump {
+                depth: reference.depth,
+                slot: reference.slot,
+                delta: if matches!(op, UpdateOp::Increment) {
+                    1
+                } else {
+                    -1
+                },
+                target: start,
+            });
+            jumped = true;
+        }
+        if !jumped {
+            if let Some(update) = update {
+                self.compile_expr(update)?;
+                self.emit(Op::Pop);
+            }
+            self.emit(Op::Jump(start));
+        }
+        let loop_context = self.loops.pop().unwrap();
+        let break_context = self.breakables.pop().unwrap();
+        let end = self.position();
+        if let Some(jump) = end_jump {
+            self.patch_jump(jump, end);
+        }
+        for jump in break_context.jumps {
+            self.patch_jump(jump, end);
+        }
+        for jump in loop_context.continue_jumps {
+            self.patch_jump(jump, continue_target);
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_for_in_of(
+        &mut self,
+        left: &ForInit,
+        right: &Expr,
+        body: &Stmt,
+        is_in: bool,
+        _is_await: bool,
+    ) -> Result<(), ParseError> {
+        let lexical = matches!(left, ForInit::Var(declaration) if declaration.kind != VarKind::Var);
+        let outer_depth = self.local_frames.len();
+        self.compile_expr(right)?;
+        self.emit(if is_in { Op::ForInInit } else { Op::IterInit });
+        let start = self.position();
+        let end_jump = self.emit_jump(Op::IterNext(0));
+        let mut iteration_size = 0;
+        if lexical {
+            let ForInit::Var(declaration) = left else {
+                unreachable!();
+            };
+            let mut frame = ScopeFrame::new();
+            if let Some(declarator) = declaration.declarations.first() {
+                for name in pattern_names(&declarator.pattern) {
+                    frame.declare(&name);
+                }
+            }
+            iteration_size = frame.size;
+            self.local_frames.push(frame);
+            self.emit(Op::PushEnv(iteration_size));
+        }
+        match left {
+            ForInit::Var(declaration) => {
+                if let Some(declarator) = declaration.declarations.first() {
+                    self.bind_pattern(&declarator.pattern, BindingMode::Auto)?;
+                }
+            }
+            ForInit::Expr(expression) => {
+                self.compile_assignment_target_store(expression)?;
+            }
+        }
+        let break_context = BreakContext {
+            label: None,
+            env_depth: outer_depth,
+            stack_cleanup: 1,
+            try_depth: self.try_depth,
+            jumps: Vec::new(),
+        };
+        let loop_context = LoopContext {
+            label: None,
+            env_depth: outer_depth,
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            continue_target: Some(start),
+            continue_jumps: Vec::new(),
+        };
+        self.breakables.push(break_context);
+        self.loops.push(loop_context);
+        self.compile_statement(body)?;
+        let loop_context = self.loops.pop().unwrap();
+        let break_context = self.breakables.pop().unwrap();
+        if lexical {
+            self.emit(Op::PopEnv);
+            self.local_frames.pop();
+        }
+        self.emit(Op::Jump(start));
+        let end = self.position();
+        self.patch_jump(end_jump, end);
+        for jump in break_context.jumps {
+            self.patch_jump(jump, end);
+        }
+        for jump in loop_context.continue_jumps {
+            self.patch_jump(jump, start);
+        }
+        let _ = iteration_size;
+        Ok(())
+    }
+
+    pub(super) fn compile_break(&mut self, label: Option<&str>) -> Result<(), ParseError> {
+        let position = self
+            .breakables
+            .iter()
+            .rposition(|context| match label {
+                Some(label) => context.label.as_deref() == Some(label),
+                None => true,
+            })
+            .ok_or_else(|| self.error("break outside of loop or switch"))?;
+        let (env_depth, stack_cleanup, try_depth) = {
+            let context = &self.breakables[position];
+            (context.env_depth, context.stack_cleanup, context.try_depth)
+        };
+        self.emit_finalizers_until(try_depth)?;
+        self.emit_cleanup(env_depth, stack_cleanup, try_depth);
+        let jump = self.emit_jump(Op::Jump(0));
+        self.breakables[position].jumps.push(jump);
+        Ok(())
+    }
+
+    pub(super) fn compile_continue(&mut self, label: Option<&str>) -> Result<(), ParseError> {
+        let position = self
+            .loops
+            .iter()
+            .rposition(|context| match label {
+                Some(label) => context.label.as_deref() == Some(label),
+                None => true,
+            })
+            .ok_or_else(|| self.error("continue outside of loop"))?;
+        let (env_depth, stack_cleanup, try_depth, target) = {
+            let context = &self.loops[position];
+            (
+                context.env_depth,
+                context.stack_cleanup,
+                context.try_depth,
+                context.continue_target,
+            )
+        };
+        self.emit_finalizers_until(try_depth)?;
+        self.emit_cleanup(env_depth, stack_cleanup, try_depth);
+        if let Some(target) = target {
+            self.emit(Op::Jump(target));
+        } else {
+            let jump = self.emit_jump(Op::Jump(0));
+            self.loops[position].continue_jumps.push(jump);
+        }
+        Ok(())
+    }
+
+    pub(super) fn emit_active_finalizers(&mut self) -> Result<(), ParseError> {
+        self.emit_finalizers_until(0)
+    }
+
+    pub(super) fn emit_finalizers_until(&mut self, target_depth: usize) -> Result<(), ParseError> {
+        let stack = self.finally_stack.clone();
+        if stack.len() <= target_depth {
+            return Ok(());
+        }
+        for index in (target_depth..stack.len()).rev() {
+            let saved = self.finally_stack.clone();
+            self.finally_stack.truncate(index);
+            self.compile_block(&stack[index])?;
+            self.finally_stack = saved;
+        }
+        Ok(())
+    }
+
+    pub(super) fn emit_cleanup(&mut self, env_depth: usize, stack_cleanup: usize, try_depth: usize) {
+        for _ in 0..stack_cleanup {
+            self.emit(Op::Pop);
+        }
+        for _ in try_depth..self.try_depth {
+            self.emit(Op::TryEnd);
+        }
+        for _ in env_depth..self.local_frames.len() {
+            self.emit(Op::PopEnv);
+        }
+    }
+
+    pub(super) fn compile_try(
+        &mut self,
+        block: &[Stmt],
+        handler: Option<&CatchClause>,
+        finalizer: Option<&[Stmt]>,
+    ) -> Result<(), ParseError> {
+        let try_start = self.emit_jump(Op::TryStart(0));
+        self.try_depth += 1;
+        if let Some(finalizer) = finalizer {
+            self.finally_stack.push(finalizer.to_vec());
+        }
+        self.compile_statements_in_scope(block)?;
+        if finalizer.is_some() {
+            self.finally_stack.pop();
+        }
+        self.emit(Op::TryEnd);
+        self.try_depth -= 1;
+        let normal_jump = self.emit_jump(Op::Jump(0));
+        let handler_pc = self.position();
+        self.patch_jump(try_start, handler_pc);
+
+        if let Some(handler) = handler {
+            let mut frame = ScopeFrame::new();
+            if let Some(param) = &handler.param {
+                for name in pattern_names(param) {
+                    frame.declare(&name);
+                }
+            }
+            let size = frame.size;
+            if size > 0 {
+                self.local_frames.push(frame);
+                self.emit(Op::PushEnv(size));
+            }
+            if let Some(param) = &handler.param {
+                self.bind_pattern(param, BindingMode::Auto)?;
+            } else {
+                self.emit(Op::Pop);
+            }
+            if let Some(finalizer) = finalizer {
+                self.finally_stack.push(finalizer.to_vec());
+            }
+            self.compile_statements_in_scope(&handler.body)?;
+            if finalizer.is_some() {
+                self.finally_stack.pop();
+            }
+            if size > 0 {
+                self.emit(Op::PopEnv);
+                self.local_frames.pop();
+            }
+        } else if let Some(finalizer) = finalizer {
+            // An exception is on the stack. Run finally, then rethrow it.
+            self.compile_statements_in_scope(finalizer)?;
+            self.emit(Op::Throw);
+        }
+
+        if handler.is_some() {
+            if let Some(finalizer) = finalizer {
+                let finally_pc = self.position();
+                self.patch_jump(normal_jump, finally_pc);
+                self.compile_statements_in_scope(finalizer)?;
+            } else {
+                let end = self.position();
+                self.patch_jump(normal_jump, end);
+            }
+        } else {
+            let finally_pc = self.position();
+            self.patch_jump(normal_jump, finally_pc);
+            self.compile_statements_in_scope(finalizer.unwrap_or(&[]))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn compile_statements_in_scope(&mut self, statements: &[Stmt]) -> Result<usize, ParseError> {
+        self.compile_block(statements)?;
+        Ok(self.position())
+    }
+
+    pub(super) fn compile_switch(
+        &mut self,
+        discriminant: &Expr,
+        cases: &[SwitchCase],
+    ) -> Result<(), ParseError> {
+        let (depth, slot) = self.alloc_temp();
+        self.compile_expr(discriminant)?;
+        self.emit(Op::SetVar { depth, slot });
+        let mut body_jumps = Vec::new();
+        let mut default_index = None;
+        for (index, case) in cases.iter().enumerate() {
+            if let Some(test) = &case.test {
+                self.emit(Op::GetVar { depth, slot });
+                self.compile_expr(test)?;
+                self.emit(Op::Eq);
+                let skip = self.emit_jump(Op::JumpIfFalse(0));
+                let jump = self.emit_jump(Op::Jump(0));
+                body_jumps.push(Some(jump));
+                let next = self.position();
+                self.patch_jump(skip, next);
+            } else {
+                default_index = Some(index);
+                body_jumps.push(None);
+            }
+        }
+        let fallback = self.emit_jump(Op::Jump(0));
+        let break_context = BreakContext {
+            label: None,
+            env_depth: self.local_frames.len(),
+            stack_cleanup: 0,
+            try_depth: self.try_depth,
+            jumps: Vec::new(),
+        };
+        self.breakables.push(break_context);
+        let mut body_positions = Vec::new();
+        for (index, case) in cases.iter().enumerate() {
+            body_positions.push(self.position());
+            if let Some(jump) = body_jumps[index] {
+                self.patch_jump(jump, self.position());
+            }
+            for statement in &case.body {
+                self.compile_statement(statement)?;
+            }
+        }
+        let end = self.position();
+        if let Some(index) = default_index {
+            self.patch_jump(fallback, body_positions[index]);
+        } else {
+            self.patch_jump(fallback, end);
+        }
+        let break_context = self.breakables.pop().unwrap();
+        for jump in break_context.jumps {
+            self.patch_jump(jump, end);
+        }
+        Ok(())
+    }
+
+    pub(super) fn alloc_temp(&mut self) -> (u16, u16) {
+        let name = format!("\0temp{}", self.temp_counter);
+        self.temp_counter += 1;
+        let slot = self.local_frames[0].declare(&name);
+        let depth = (self.local_frames.len() - 1) as u16;
+        (depth, slot)
+    }
+}

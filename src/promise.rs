@@ -3,7 +3,7 @@
 //! QuickJS keeps promise state, reactions and the job list in
 //! `JSPromiseData` / `JSContext.job_list`; the functions here are the safe
 //! Rust equivalents of `js_promise_resolve`, `js_promise_then` and
-//! `JS_ExecutePendingJob` (quickjs.c:23952).
+//! `JS_ExecutePendingJob` (quickjs.c:2525).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

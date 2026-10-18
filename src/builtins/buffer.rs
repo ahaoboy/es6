@@ -109,7 +109,7 @@ fn array_buffer_constructor(
     _this: &JsValue,
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
-    let length = arg_number(arguments, 0).unwrap_or(0.0);
+    let length = arg_number(realm, arguments, 0).unwrap_or(0.0);
     if length < 0.0 || length.fract() != 0.0 || length > 4_294_967_295.0 {
         return Err(realm.range_error("Invalid array buffer length"));
     }
@@ -155,8 +155,8 @@ fn array_buffer_slice(
     let (_, bytes) = array_buffer_bytes(realm, this)?;
     let bytes = bytes.borrow();
     let length = bytes.len();
-    let start = normalize_index(arg_number(arguments, 0).unwrap_or(0.0), length);
-    let end = normalize_index(arg_number(arguments, 1).unwrap_or(length as f64), length);
+    let start = normalize_index(arg_number(realm, arguments, 0).unwrap_or(0.0), length);
+    let end = normalize_index(arg_number(realm, arguments, 1).unwrap_or(length as f64), length);
     let end = end.max(start);
     Ok(JsValue::Object(
         realm.array_buffer_from(bytes[start..end].to_vec()),
@@ -198,7 +198,7 @@ fn data_view_constructor(
     let offset = if arg(arguments, 1).is_undefined() {
         0.0
     } else {
-        arg_number(arguments, 1)?
+        arg_number(realm, arguments, 1)?
     };
     if offset < 0.0 || offset.fract() != 0.0 || offset as usize > length {
         return Err(realm.range_error("Invalid DataView offset"));
@@ -207,7 +207,7 @@ fn data_view_constructor(
     let byte_length = if arg(arguments, 2).is_undefined() {
         length - offset
     } else {
-        let value = arg_number(arguments, 2)?;
+        let value = arg_number(realm, arguments, 2)?;
         if value < 0.0 || value.fract() != 0.0 || offset + value as usize > length {
             return Err(realm.range_error("Invalid DataView length"));
         }
@@ -256,7 +256,7 @@ fn read_bytes(
     width: usize,
 ) -> JsResult<([u8; 8], bool)> {
     let (_, view) = data_view_of(realm, this)?;
-    let index = arg_number(arguments, 0)?;
+    let index = arg_number(realm, arguments, 0)?;
     if index < 0.0 || index.fract() != 0.0 {
         return Err(realm.range_error("Invalid DataView offset"));
     }
@@ -283,7 +283,7 @@ fn write_bytes(
     value: [u8; 8],
 ) -> JsResult<JsValue> {
     let (_, view) = data_view_of(realm, this)?;
-    let index = arg_number(arguments, 0)?;
+    let index = arg_number(realm, arguments, 0)?;
     if index < 0.0 || index.fract() != 0.0 {
         return Err(realm.range_error("Invalid DataView offset"));
     }
@@ -344,45 +344,45 @@ fn get_f64(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult
 }
 
 fn set_u8(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_uint32(arg_number(arguments, 1)?) as u8;
+    let value = crate::vm::to_uint32(arg_number(realm, arguments, 1)?) as u8;
     write_bytes(realm, this, arguments, 1, [value; 8])
 }
 fn set_i8(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_int32(arg_number(arguments, 1)?) as i8 as u8;
+    let value = crate::vm::to_int32(arg_number(realm, arguments, 1)?) as i8 as u8;
     write_bytes(realm, this, arguments, 1, [value; 8])
 }
 fn set_u16(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_uint32(arg_number(arguments, 1)?) as u16;
+    let value = crate::vm::to_uint32(arg_number(realm, arguments, 1)?) as u16;
     let mut bytes = [0; 8];
     bytes[..2].copy_from_slice(&value.to_le_bytes());
     write_bytes(realm, this, arguments, 2, bytes)
 }
 fn set_i16(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_int32(arg_number(arguments, 1)?) as i16;
+    let value = crate::vm::to_int32(arg_number(realm, arguments, 1)?) as i16;
     let mut bytes = [0; 8];
     bytes[..2].copy_from_slice(&value.to_le_bytes());
     write_bytes(realm, this, arguments, 2, bytes)
 }
 fn set_u32(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_uint32(arg_number(arguments, 1)?);
+    let value = crate::vm::to_uint32(arg_number(realm, arguments, 1)?);
     let mut bytes = [0; 8];
     bytes[..4].copy_from_slice(&value.to_le_bytes());
     write_bytes(realm, this, arguments, 4, bytes)
 }
 fn set_i32(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_int32(arg_number(arguments, 1)?);
+    let value = crate::vm::to_int32(arg_number(realm, arguments, 1)?);
     let mut bytes = [0; 8];
     bytes[..4].copy_from_slice(&value.to_le_bytes());
     write_bytes(realm, this, arguments, 4, bytes)
 }
 fn set_f32(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = arg_number(arguments, 1)? as f32;
+    let value = arg_number(realm, arguments, 1)? as f32;
     let mut bytes = [0; 8];
     bytes[..4].copy_from_slice(&value.to_le_bytes());
     write_bytes(realm, this, arguments, 4, bytes)
 }
 fn set_f64(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = arg_number(arguments, 1)?;
+    let value = arg_number(realm, arguments, 1)?;
     write_bytes(realm, this, arguments, 8, value.to_le_bytes())
 }
 
@@ -421,7 +421,7 @@ fn make_typed(realm: &mut Realm, kind: TypedArrayKind, arguments: &[JsValue]) ->
             let offset = if arg(arguments, 1).is_undefined() {
                 0.0
             } else {
-                arg_number(arguments, 1)?
+                arg_number(realm, arguments, 1)?
             };
             if offset < 0.0 || offset.fract() != 0.0 || offset as usize > buffer_length {
                 return Err(realm.range_error("Invalid typed array offset"));
@@ -433,7 +433,7 @@ fn make_typed(realm: &mut Realm, kind: TypedArrayKind, arguments: &[JsValue]) ->
                 }
                 (buffer_length - offset) / bytes_per_element
             } else {
-                let length = arg_number(arguments, 2)?;
+                let length = arg_number(realm, arguments, 2)?;
                 if length < 0.0 || length.fract() != 0.0 {
                     return Err(realm.range_error("Invalid typed array length"));
                 }
@@ -474,7 +474,7 @@ fn make_typed(realm: &mut Realm, kind: TypedArrayKind, arguments: &[JsValue]) ->
         length,
     };
     for (index, value) in values.into_iter().enumerate() {
-        data.set(index, &value);
+        data.set(realm, index, &value);
     }
     Ok(JsValue::Object(realm.typed_array(data)))
 }
@@ -531,7 +531,7 @@ fn typed_set(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
     let offset = if arg(arguments, 1).is_undefined() {
         0.0
     } else {
-        arg_number(arguments, 1)?
+        arg_number(realm, arguments, 1)?
     };
     if offset < 0.0 || offset.fract() != 0.0 {
         return Err(realm.range_error("Invalid typed array offset"));
@@ -541,16 +541,16 @@ fn typed_set(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
         return Err(realm.range_error("Source is too large"));
     }
     for (index, value) in values.into_iter().enumerate() {
-        target.set(offset + index, &value);
+        target.set(realm, offset + index, &value);
     }
     Ok(JsValue::Undefined)
 }
 
 fn typed_subarray(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let target = typed_array_of(realm, this)?;
-    let start = normalize_index(arg_number(arguments, 0).unwrap_or(0.0), target.length);
+    let start = normalize_index(arg_number(realm, arguments, 0).unwrap_or(0.0), target.length);
     let end = normalize_index(
-        arg_number(arguments, 1).unwrap_or(target.length as f64),
+        arg_number(realm, arguments, 1).unwrap_or(target.length as f64),
         target.length,
     );
     let end = end.max(start);
@@ -566,9 +566,9 @@ fn typed_subarray(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> J
 
 fn typed_slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let target = typed_array_of(realm, this)?;
-    let start = normalize_index(arg_number(arguments, 0).unwrap_or(0.0), target.length);
+    let start = normalize_index(arg_number(realm, arguments, 0).unwrap_or(0.0), target.length);
     let end = normalize_index(
-        arg_number(arguments, 1).unwrap_or(target.length as f64),
+        arg_number(realm, arguments, 1).unwrap_or(target.length as f64),
         target.length,
     );
     let end = end.max(start);

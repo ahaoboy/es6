@@ -40,13 +40,13 @@ pub fn install(realm: &mut Realm) {
 }
 
 fn is_nan(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_number(arg(arguments, 0))?;
+    let value = crate::vm::to_number(realm, arg(arguments, 0))?;
     let _ = realm;
     Ok(JsValue::Bool(value.is_nan()))
 }
 
 fn is_finite(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let value = crate::vm::to_number(arg(arguments, 0))?;
+    let value = crate::vm::to_number(realm, arg(arguments, 0))?;
     let _ = realm;
     Ok(JsValue::Bool(value.is_finite()))
 }
