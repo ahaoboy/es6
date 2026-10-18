@@ -156,7 +156,10 @@ fn array_buffer_slice(
     let bytes = bytes.borrow();
     let length = bytes.len();
     let start = normalize_index(arg_number(realm, arguments, 0).unwrap_or(0.0), length);
-    let end = normalize_index(arg_number(realm, arguments, 1).unwrap_or(length as f64), length);
+    let end = normalize_index(
+        arg_number(realm, arguments, 1).unwrap_or(length as f64),
+        length,
+    );
     let end = end.max(start);
     Ok(JsValue::Object(
         realm.array_buffer_from(bytes[start..end].to_vec()),
@@ -548,7 +551,10 @@ fn typed_set(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
 
 fn typed_subarray(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let target = typed_array_of(realm, this)?;
-    let start = normalize_index(arg_number(realm, arguments, 0).unwrap_or(0.0), target.length);
+    let start = normalize_index(
+        arg_number(realm, arguments, 0).unwrap_or(0.0),
+        target.length,
+    );
     let end = normalize_index(
         arg_number(realm, arguments, 1).unwrap_or(target.length as f64),
         target.length,
@@ -566,7 +572,10 @@ fn typed_subarray(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> J
 
 fn typed_slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let target = typed_array_of(realm, this)?;
-    let start = normalize_index(arg_number(realm, arguments, 0).unwrap_or(0.0), target.length);
+    let start = normalize_index(
+        arg_number(realm, arguments, 0).unwrap_or(0.0),
+        target.length,
+    );
     let end = normalize_index(
         arg_number(realm, arguments, 1).unwrap_or(target.length as f64),
         target.length,

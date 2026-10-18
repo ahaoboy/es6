@@ -459,10 +459,7 @@ fn sort(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
     let comparator = arg(arguments, 0);
     // `undefined` elements never reach the comparator: they are removed
     // first and appended after sorting (ES2022 23.1.3.30).
-    let undefined = items
-        .iter()
-        .filter(|item| item.is_undefined())
-        .count();
+    let undefined = items.iter().filter(|item| item.is_undefined()).count();
     items.retain(|item| !item.is_undefined());
     if comparator.is_function() {
         let mut error: Option<JsValue> = None;
@@ -506,7 +503,7 @@ fn sort(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
             crate::coerce::utf16_cmp(&left, &right)
         });
     }
-    items.extend(std::iter::repeat(JsValue::Undefined).take(undefined));
+    items.extend(std::iter::repeat_n(JsValue::Undefined, undefined));
     set_array_items(realm, &object, items);
     Ok(this.clone())
 }
@@ -533,7 +530,10 @@ fn copy_within(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsRe
     let length = items.len();
     let target = normalize_index(arg_number(realm, arguments, 0)?, length);
     let start = normalize_index(arg_number(realm, arguments, 1)?, length);
-    let end = normalize_index(arg_number(realm, arguments, 2).unwrap_or(length as f64), length);
+    let end = normalize_index(
+        arg_number(realm, arguments, 2).unwrap_or(length as f64),
+        length,
+    );
     let count = (end.saturating_sub(start)).min(length.saturating_sub(target));
     let source: Vec<JsValue> = items[start..start + count].to_vec();
     items[target..target + count].clone_from_slice(&source);

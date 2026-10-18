@@ -10,9 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::object::{
-    NativeData, ObjRef, ObjectKind, PromiseReaction, PromiseState, PropKey,
-};
+use crate::object::{NativeData, ObjRef, ObjectKind, PromiseReaction, PromiseState, PropKey};
 use crate::runtime::Realm;
 use crate::value::{JsResult, JsValue};
 use crate::vm::Job;
@@ -188,8 +186,7 @@ pub fn await_value(
         JsValue::Object(frame_object),
         JsValue::Object(completion),
     ]));
-    let on_fulfilled =
-        realm.native_function_data("", 1, data.clone(), await_resumed::<true>);
+    let on_fulfilled = realm.native_function_data("", 1, data.clone(), await_resumed::<true>);
     let on_rejected = realm.native_function_data("", 1, data, await_resumed::<false>);
     attach(realm, &promise, Some(on_fulfilled), Some(on_rejected), None)
 }
@@ -361,7 +358,11 @@ fn propagate_rejection(
     data: &[JsValue],
 ) -> JsResult<JsValue> {
     if let Some(result) = data.first().and_then(|value| value.as_object()) {
-        reject(realm, &result.into_ref(), crate::builtins::arg(arguments, 0))?;
+        reject(
+            realm,
+            &result.into_ref(),
+            crate::builtins::arg(arguments, 0),
+        )?;
     }
     Ok(JsValue::Undefined)
 }
@@ -387,8 +388,7 @@ pub fn all(realm: &mut Realm, iterable: JsValue) -> JsResult<JsValue> {
             JsValue::Object(record.clone()),
             JsValue::number(index as f64),
         ]));
-        let on_fulfilled =
-            realm.native_function_data("", 1, element.clone(), all_resolve_element);
+        let on_fulfilled = realm.native_function_data("", 1, element.clone(), all_resolve_element);
         let on_rejected = realm.native_function_data("", 1, element, all_reject_element);
         attach(realm, &promise, Some(on_fulfilled), Some(on_rejected), None)?;
     }
@@ -406,8 +406,7 @@ pub fn race(realm: &mut Realm, iterable: JsValue) -> JsResult<JsValue> {
     for item in items {
         let promise = resolve_value(realm, item)?;
         let element: NativeData = Rc::new(RefCell::new(vec![JsValue::Object(record.clone())]));
-        let on_fulfilled =
-            realm.native_function_data("", 1, element.clone(), race_resolve_element);
+        let on_fulfilled = realm.native_function_data("", 1, element.clone(), race_resolve_element);
         let on_rejected = realm.native_function_data("", 1, element, race_reject_element);
         attach(realm, &promise, Some(on_fulfilled), Some(on_rejected), None)?;
     }
@@ -428,10 +427,7 @@ fn combinator_record(realm: &Realm, result: &ObjRef, count: usize) -> ObjRef {
         "remaining",
         crate::object::Property::data(JsValue::number(count as f64)),
     );
-    data.define(
-        "done",
-        crate::object::Property::data(JsValue::Bool(false)),
-    );
+    data.define("done", crate::object::Property::data(JsValue::Bool(false)));
     let values = realm.array(Vec::new());
     data.define(
         "values",
@@ -454,7 +450,7 @@ fn record_number(record: &ObjRef, name: &str) -> f64 {
 fn record_bool(record: &ObjRef, name: &str) -> bool {
     record_field(record, name)
         .as_ref()
-        .map(|value| crate::vm::to_boolean(value))
+        .map(crate::vm::to_boolean)
         .unwrap_or(false)
 }
 
@@ -487,7 +483,7 @@ fn all_resolve_element(
     let values = record_field(&record, "values")
         .and_then(|value| value.as_object())
         .ok_or_else(|| realm.type_error("Invalid combinator record"))?;
-    let _ = values.set_index(index, crate::builtins::arg(arguments, 0));
+    values.set_index(index, crate::builtins::arg(arguments, 0));
     let remaining = record_number(&record, "remaining") - 1.0;
     set_record_field(&record, "remaining", JsValue::number(remaining));
     if remaining <= 0.0 {

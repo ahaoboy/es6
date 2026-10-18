@@ -36,11 +36,7 @@ pub(crate) fn generator_next(
                 std::mem::take(&mut generator.arguments),
                 std::mem::replace(&mut generator.state, GeneratorState::Executing),
             ),
-            _ => {
-                return Err(
-                    realm.type_error("Generator method called on incompatible receiver")
-                )
-            }
+            _ => return Err(realm.type_error("Generator method called on incompatible receiver")),
         }
     };
     let outcome = match state {
@@ -110,11 +106,7 @@ pub(crate) fn generator_throw(
             ObjectKind::Generator(generator) => {
                 std::mem::replace(&mut generator.state, GeneratorState::Executing)
             }
-            _ => {
-                return Err(
-                    realm.type_error("Generator method called on incompatible receiver")
-                )
-            }
+            _ => return Err(realm.type_error("Generator method called on incompatible receiver")),
         }
     };
     match state {
@@ -166,10 +158,7 @@ fn start_frame(
     frame.definition = definition.clone();
     frame.env = if use_env {
         let parent = function.env.clone().unwrap_or_else(|| Env::new(0, None));
-        Some(Env::new(
-            definition.env_size as usize,
-            Some(parent),
-        ))
+        Some(Env::new(definition.env_size as usize, Some(parent)))
     } else {
         None
     };
@@ -184,10 +173,6 @@ fn start_frame(
     Ok(frame)
 }
 
-fn arguments_iter(arguments: Vec<JsValue>) -> std::vec::IntoIter<JsValue> {
-    arguments.into_iter()
-}
-
 /// Convert a `run_loop` outcome into the iterator-result object, updating
 /// the generator state.
 fn finish_generator(
@@ -196,6 +181,10 @@ fn finish_generator(
     outcome: (JsResult<RunOutcome>, Option<Box<Frame>>),
 ) -> JsResult<JsValue> {
     let (result, frame) = outcome;
+    // Recycle the frame for pooled reuse on every non-yield completion.
+    if let Some(frame) = frame {
+        super::recycle_frame(realm, frame);
+    }
     match result {
         Ok(RunOutcome::Return(value)) => {
             set_generator_state(object, GeneratorState::Completed);
@@ -214,12 +203,6 @@ fn finish_generator(
             Err(error)
         }
     }
-    .map(|value| {
-        if let Some(frame) = frame {
-            super::recycle_frame(realm, frame);
-        }
-        value
-    })
 }
 
 /// Build the `{ value, done }` iterator result object.

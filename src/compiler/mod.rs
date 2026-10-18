@@ -421,7 +421,6 @@ impl Compiler {
         }
         Ok(())
     }
-
 }
 
 mod class;

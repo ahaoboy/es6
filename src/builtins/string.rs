@@ -221,22 +221,21 @@ fn slice(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<J
     let units: Vec<u16> = value.encode_utf16().collect();
     let length = units.len();
     let start = normalize_index(arg_number_or(realm, arguments, 0, 0.0)?, length);
-    let end = normalize_index(
-        arg_number_or(realm, arguments, 1, length as f64)?,
-        length,
-    );
+    let end = normalize_index(arg_number_or(realm, arguments, 1, length as f64)?, length);
     if start >= end {
         return Ok(JsValue::string(""));
     }
-    Ok(JsValue::string(String::from_utf16_lossy(&units[start..end])))
+    Ok(JsValue::string(String::from_utf16_lossy(
+        &units[start..end],
+    )))
 }
 
 fn substring(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
     let units: Vec<u16> = value.encode_utf16().collect();
     let length = units.len();
-    let mut start = to_integer(arg_number_or(realm, arguments, 0, 0.0)?)
-        .clamp(0, length as i64) as usize;
+    let mut start =
+        to_integer(arg_number_or(realm, arguments, 0, 0.0)?).clamp(0, length as i64) as usize;
     let mut end = if arguments.get(1).is_some_and(|value| !value.is_undefined()) {
         to_integer(arg_number(realm, arguments, 1)?).clamp(0, length as i64) as usize
     } else {
@@ -275,7 +274,9 @@ fn to_lower_case(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> J
 }
 
 fn trim(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
-    Ok(JsValue::string(trim_ecma_whitespace(&this_string(realm, this)?)))
+    Ok(JsValue::string(trim_ecma_whitespace(&this_string(
+        realm, this,
+    )?)))
 }
 
 fn trim_start(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
@@ -295,8 +296,16 @@ fn trim_end(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResu
 fn is_ecma_whitespace(ch: char) -> bool {
     matches!(
         ch,
-        '\u{0009}' | '\u{000B}' | '\u{000C}' | '\u{0020}' | '\u{00A0}' | '\u{FEFF}'
-            | '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}'
+        '\u{0009}'
+            | '\u{000B}'
+            | '\u{000C}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{FEFF}'
+            | '\u{000A}'
+            | '\u{000D}'
+            | '\u{2028}'
+            | '\u{2029}'
     )
 }
 
@@ -505,7 +514,11 @@ fn replace_impl(
         offset = absolute + needle.len();
         if offset == absolute {
             // Empty needle: copy one code unit and continue.
-            let skip = value[offset..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(0);
+            let skip = value[offset..]
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(0);
             if skip == 0 {
                 break;
             }
@@ -534,7 +547,7 @@ fn replace_regex(
         result.push_str(&value[last..range.start]);
         let matched_text = &value[range.clone()];
         let groups: Vec<Option<std::ops::Range<usize>>> = (1..=matched.captures.len())
-            .map(|group| matched.group(group).map(|group| group.clone()))
+            .map(|group| matched.group(group))
             .collect();
         let replacement_value = if replacement.is_function() {
             let mut arguments = vec![JsValue::string(matched_text.to_owned())];
@@ -546,7 +559,9 @@ fn replace_regex(
                         .unwrap_or(JsValue::Undefined),
                 );
             }
-            arguments.push(JsValue::number(byte_to_utf16_offset(value, range.start) as f64));
+            arguments.push(JsValue::number(
+                byte_to_utf16_offset(value, range.start) as f64
+            ));
             arguments.push(JsValue::string(value.to_owned()));
             super::call(realm, replacement.clone(), JsValue::Undefined, &arguments)?
         } else {
@@ -679,7 +694,11 @@ fn match_(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
         );
     }
     let result = realm.array(values);
-    define_value(&result, "index", JsValue::number(byte_to_utf16_offset(&value, range.start) as f64));
+    define_value(
+        &result,
+        "index",
+        JsValue::number(byte_to_utf16_offset(&value, range.start) as f64),
+    );
     define_value(&result, "input", JsValue::string(value));
     Ok(JsValue::Object(result))
 }
@@ -709,21 +728,25 @@ fn search(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
 fn locale_compare(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
     let other = crate::vm::to_string(realm, arg(arguments, 0))?;
-    Ok(JsValue::number(match crate::coerce::utf16_cmp(&value, &other) {
-        std::cmp::Ordering::Less => -1.0,
-        std::cmp::Ordering::Equal => 0.0,
-        std::cmp::Ordering::Greater => 1.0,
-    }))
+    Ok(JsValue::number(
+        match crate::coerce::utf16_cmp(&value, &other) {
+            std::cmp::Ordering::Less => -1.0,
+            std::cmp::Ordering::Equal => 0.0,
+            std::cmp::Ordering::Greater => 1.0,
+        },
+    ))
 }
 
 fn iterator_values(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = this_string(realm, this)?;
-    Ok(JsValue::Object(realm.iterator(
-        value
-            .encode_utf16()
-            .map(|unit| JsValue::string(String::from_utf16_lossy(&[unit])))
-            .collect(),
-    )))
+    Ok(JsValue::Object(
+        realm.iterator(
+            value
+                .encode_utf16()
+                .map(|unit| JsValue::string(String::from_utf16_lossy(&[unit])))
+                .collect(),
+        ),
+    ))
 }
 
 fn regexp_data(value: &JsValue) -> Option<Rc<RegExpData>> {

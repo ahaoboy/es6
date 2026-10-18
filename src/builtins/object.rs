@@ -449,20 +449,18 @@ fn get_own_property_descriptor(
             // Virtual properties: dense elements and exotic built-in
             // fields, with the attribute sets of ES2022 10.4.
             None => match (&data.kind, key.index(), key.as_str()) {
-                (ObjectKind::Array(_), _, Some(name)) if name == "length" => {
-                    (true, false, false, None, None)
-                }
+                (ObjectKind::Array(_), _, Some("length")) => (true, false, false, None, None),
                 (ObjectKind::Array(_) | ObjectKind::BoxedString(_), Some(_), _) => {
                     (true, true, true, None, None)
                 }
-                (ObjectKind::BoxedString(_), _, Some(name)) if name == "length" => {
+                (ObjectKind::BoxedString(_), _, Some("length")) => {
                     (false, false, false, None, None)
                 }
-                (ObjectKind::TypedArray(_), _, Some(name))
-                    if matches!(name, "length" | "byteLength" | "byteOffset" | "buffer") =>
-                {
-                    (false, false, false, None, None)
-                }
+                (
+                    ObjectKind::TypedArray(_),
+                    _,
+                    Some("length" | "byteLength" | "byteOffset" | "buffer"),
+                ) => (false, false, false, None, None),
                 (ObjectKind::TypedArray(_), Some(_), _) => (true, true, false, None, None),
                 _ => (true, true, true, None, None),
             },

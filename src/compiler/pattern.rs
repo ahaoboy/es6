@@ -4,7 +4,11 @@
 use super::*;
 
 impl Compiler {
-    pub(super) fn bind_pattern(&mut self, pattern: &Pattern, mode: BindingMode) -> Result<(), ParseError> {
+    pub(super) fn bind_pattern(
+        &mut self,
+        pattern: &Pattern,
+        mode: BindingMode,
+    ) -> Result<(), ParseError> {
         match pattern {
             Pattern::Ident(name) => {
                 if matches!(mode, BindingMode::Global) {

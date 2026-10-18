@@ -86,16 +86,13 @@ fn parse_float(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
     let value = crate::coerce::trim_ecma_whitespace(&value);
     // `parseFloat` accepts a leading `Infinity` (ES2022 19.2.5).
     for prefix in ["Infinity", "+Infinity", "-Infinity"] {
-        if let Some(rest) = value.strip_prefix(prefix) {
-            if rest.is_empty()
-                || !rest.as_bytes()[0].is_ascii_digit()
-                || rest.starts_with('.')
-            {
-                return Ok(JsValue::number(match prefix {
-                    "-Infinity" => f64::NEG_INFINITY,
-                    _ => f64::INFINITY,
-                }));
-            }
+        if let Some(rest) = value.strip_prefix(prefix)
+            && (rest.is_empty() || !rest.as_bytes()[0].is_ascii_digit() || rest.starts_with('.'))
+        {
+            return Ok(JsValue::number(match prefix {
+                "-Infinity" => f64::NEG_INFINITY,
+                _ => f64::INFINITY,
+            }));
         }
     }
     let mut end = 0;
@@ -305,7 +302,9 @@ fn decimal_digits(value: f64) -> (String, i32) {
         None => (text, 0),
     };
     let mut digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    let mut point = mantissa.find('.').map_or(digits.len() as i32, |index| index as i32);
+    let mut point = mantissa
+        .find('.')
+        .map_or(digits.len() as i32, |index| index as i32);
     point += exponent_text;
     // Drop non-significant leading zeros: `0.000123` must become
     // `("123", -3)`, not `("0000123", 1)`.
@@ -325,10 +324,7 @@ fn round_digits(digits: &str, point: i32, keep: usize) -> (String, i32) {
     let mut kept: String = digits.chars().take(keep).collect();
     let mut point = point;
     if digits.len() > keep {
-        let round_up = digits
-            .chars()
-            .nth(keep)
-            .is_some_and(|ch| ch > '4');
+        let round_up = digits.chars().nth(keep).is_some_and(|ch| ch > '4');
         if round_up {
             let mut overflow = true;
             for index in (0..kept.len()).rev() {
@@ -477,9 +473,7 @@ fn to_exponential(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> J
     }
     let digits = to_integer(arg_number(realm, arguments, 0)?);
     if !(0..=100).contains(&digits) {
-        return Err(realm.range_error(
-            "toExponential() argument must be between 0 and 100",
-        ));
+        return Err(realm.range_error("toExponential() argument must be between 0 and 100"));
     }
     let digits = digits as usize;
     let negative = value.is_sign_negative();
@@ -505,9 +499,7 @@ fn to_precision(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsR
     }
     let precision = to_integer(arg_number(realm, arguments, 0)?);
     if !(1..=100).contains(&precision) {
-        return Err(realm.range_error(
-            "toPrecision() argument must be between 1 and 100",
-        ));
+        return Err(realm.range_error("toPrecision() argument must be between 1 and 100"));
     }
     let precision = precision as usize;
     let negative = value.is_sign_negative();
@@ -517,7 +509,10 @@ fn to_precision(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsR
     // (ES2022 20.1.3.5 step 10).
     if point < -6 || point > precision as i32 {
         Ok(JsValue::string(render_exponential(
-            &rounded, point, negative, precision - 1,
+            &rounded,
+            point,
+            negative,
+            precision - 1,
         )))
     } else {
         let fraction = precision.saturating_sub(point.max(0) as usize);

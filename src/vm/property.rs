@@ -6,9 +6,9 @@
 
 use std::rc::Rc;
 
+use super::ValueStack;
 use super::call::call_value;
 use super::ops::pop;
-use super::ValueStack;
 use crate::object::{Object, ObjectData, PropCache, PropKey, Property};
 use crate::runtime::Realm;
 use crate::value::{JsResult, JsValue};
@@ -33,9 +33,7 @@ pub fn get_value_property(realm: &mut Realm, value: &JsValue, key: &PropKey) -> 
             let text = text_value.as_ref();
             let index = match key {
                 PropKey::Str(name) if name.as_ref() == "length" => {
-                    return Ok(JsValue::number(
-                        crate::object::utf16_len(text) as f64,
-                    ));
+                    return Ok(JsValue::number(crate::object::utf16_len(text) as f64));
                 }
                 // Element reads reach here as canonical `Index` keys as well
                 // as numeric strings, like QuickJS' tagged-int atoms.
@@ -72,7 +70,8 @@ pub fn get_value_property(realm: &mut Realm, value: &JsValue, key: &PropKey) -> 
 /// Monomorphic property get. Shape checks plus a weak holder reference make
 /// the cached `IndexMap` slot valid without hashing the property name again.
 #[inline]
-pub(crate) fn cached_get_property(    realm: &mut Realm,
+pub(crate) fn cached_get_property(
+    realm: &mut Realm,
     object: &JsValue,
     key: &PropKey,
     cache: &std::cell::RefCell<PropCache>,
@@ -96,7 +95,7 @@ pub(crate) fn cached_get_property(    realm: &mut Realm,
                             .as_ref()
                             .is_some_and(|value| Rc::ptr_eq(value, &proto))
                     })
-                    && !data.props.contains_key(key)
+                && !data.props.contains_key(key)
             {
                 entry
                     .holder

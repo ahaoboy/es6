@@ -67,19 +67,11 @@ fn generator_next(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> J
     crate::vm::generator::generator_next(realm, this, arguments)
 }
 
-fn generator_return(
-    realm: &mut Realm,
-    this: &JsValue,
-    arguments: &[JsValue],
-) -> JsResult<JsValue> {
+fn generator_return(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     crate::vm::generator::generator_return(realm, this, arguments)
 }
 
-fn generator_throw(
-    realm: &mut Realm,
-    this: &JsValue,
-    arguments: &[JsValue],
-) -> JsResult<JsValue> {
+fn generator_throw(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     crate::vm::generator::generator_throw(realm, this, arguments)
 }
 
@@ -108,9 +100,13 @@ fn array_iterator_keys(
 ) -> JsResult<JsValue> {
     let array = array_object(realm, this)?;
     let length = array.len();
-    Ok(JsValue::Object(realm.iterator(
-        (0..length).map(|index| JsValue::number(index as f64)).collect(),
-    )))
+    Ok(JsValue::Object(
+        realm.iterator(
+            (0..length)
+                .map(|index| JsValue::number(index as f64))
+                .collect(),
+        ),
+    ))
 }
 
 fn array_iterator_entries(

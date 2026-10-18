@@ -352,7 +352,10 @@ impl Compiler {
         }
     }
 
-    pub(super) fn compile_array_literal(&mut self, elements: &[ArrayElement]) -> Result<(), ParseError> {
+    pub(super) fn compile_array_literal(
+        &mut self,
+        elements: &[ArrayElement],
+    ) -> Result<(), ParseError> {
         self.emit(Op::NewArray(0));
         for element in elements {
             match element {
@@ -373,7 +376,10 @@ impl Compiler {
         Ok(())
     }
 
-    pub(super) fn compile_object_literal(&mut self, properties: &[ObjectProperty]) -> Result<(), ParseError> {
+    pub(super) fn compile_object_literal(
+        &mut self,
+        properties: &[ObjectProperty],
+    ) -> Result<(), ParseError> {
         if !properties.is_empty() {
             let mut keys = Vec::with_capacity(properties.len());
             let mut static_keys = true;
@@ -473,7 +479,10 @@ impl Compiler {
         Ok(())
     }
 
-    pub(super) fn compile_member_key(&mut self, property: &MemberProperty) -> Result<(), ParseError> {
+    pub(super) fn compile_member_key(
+        &mut self,
+        property: &MemberProperty,
+    ) -> Result<(), ParseError> {
         match property {
             MemberProperty::Ident(name) => {
                 self.push_string(name);
@@ -747,7 +756,10 @@ impl Compiler {
         Ok(())
     }
 
-    pub(super) fn compile_arguments_array(&mut self, arguments: &[Argument]) -> Result<(), ParseError> {
+    pub(super) fn compile_arguments_array(
+        &mut self,
+        arguments: &[Argument],
+    ) -> Result<(), ParseError> {
         self.emit(Op::NewArray(0));
         for argument in arguments {
             match argument {
@@ -986,7 +998,10 @@ impl Compiler {
         Ok(())
     }
 
-    pub(super) fn compile_assignment_target_store(&mut self, target: &Expr) -> Result<(), ParseError> {
+    pub(super) fn compile_assignment_target_store(
+        &mut self,
+        target: &Expr,
+    ) -> Result<(), ParseError> {
         match &target.kind {
             ExprKind::Ident(name) => {
                 self.store_ident(name, BindingMode::Auto);

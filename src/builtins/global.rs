@@ -120,8 +120,7 @@ fn percent_encode(value: &str, keep_uri_chars: bool) -> String {
 /// — only the `decodeURIComponent` set decodes them.
 fn decode_uri(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let value = crate::vm::to_string(realm, arg(arguments, 0))?;
-    percent_decode(&value, false)
-        .ok_or_else(|| realm.uri_error("URI malformed"))
+    percent_decode(&value, false).ok_or_else(|| realm.uri_error("URI malformed"))
 }
 
 fn percent_decode(value: &str, decode_reserved: bool) -> Option<JsValue> {

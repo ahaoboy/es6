@@ -27,9 +27,9 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
     let promise = realm.promise();
     // The resolve/reject pair carries the promise in a GC-visible data cell
     // (quickjs `js_c_function_data`, quickjs.c:6595).
-    let data: crate::object::NativeData = Rc::new(std::cell::RefCell::new(vec![
-        JsValue::Object(promise.clone()),
-    ]));
+    let data: crate::object::NativeData = Rc::new(std::cell::RefCell::new(vec![JsValue::Object(
+        promise.clone(),
+    )]));
     let resolve = realm.native_function_data("", 1, data.clone(), executor_resolve);
     let reject = realm.native_function_data("", 1, data, executor_reject);
     if let Err(error) = super::call(realm, executor, JsValue::Undefined, &[resolve, reject]) {
@@ -46,10 +46,10 @@ fn executor_resolve(
     arguments: &[JsValue],
     data: &[JsValue],
 ) -> JsResult<JsValue> {
-    if let Some(JsValue::Object(promise)) = data.first() {
-        if matches!(core::state(promise), Some((PromiseState::Pending, _))) {
-            core::resolve(realm, promise, arg(arguments, 0))?;
-        }
+    if let Some(JsValue::Object(promise)) = data.first()
+        && matches!(core::state(promise), Some((PromiseState::Pending, _)))
+    {
+        core::resolve(realm, promise, arg(arguments, 0))?;
     }
     Ok(JsValue::Undefined)
 }
@@ -60,10 +60,10 @@ fn executor_reject(
     arguments: &[JsValue],
     data: &[JsValue],
 ) -> JsResult<JsValue> {
-    if let Some(JsValue::Object(promise)) = data.first() {
-        if matches!(core::state(promise), Some((PromiseState::Pending, _))) {
-            core::reject(realm, promise, arg(arguments, 0))?;
-        }
+    if let Some(JsValue::Object(promise)) = data.first()
+        && matches!(core::state(promise), Some((PromiseState::Pending, _)))
+    {
+        core::reject(realm, promise, arg(arguments, 0))?;
     }
     Ok(JsValue::Undefined)
 }

@@ -42,8 +42,7 @@ pub fn iterable_items(realm: &mut Realm, value: JsValue) -> JsResult<Vec<JsValue
             drop(data);
             let iterator_key = PropKey::Symbol(realm.well_known_symbol("iterator"));
             if object.borrow().has_property(&iterator_key) {
-                let method =
-                    super::property::get_value_property(realm, &value, &iterator_key)?;
+                let method = super::property::get_value_property(realm, &value, &iterator_key)?;
                 if method.is_function() {
                     let iterator = call_value(realm, method, value.clone(), &[])?;
                     return drain_protocol_iterator(realm, &iterator);
@@ -51,19 +50,12 @@ pub fn iterable_items(realm: &mut Realm, value: JsValue) -> JsResult<Vec<JsValue
             }
             // Spread accepts a bare iterator too: any object with a callable
             // `next` (ES2022 13.2.8.5 IteratorToList).
-            let next = super::property::get_value_property(
-                realm,
-                &value,
-                &PropKey::from("next"),
-            )?;
+            let next = super::property::get_value_property(realm, &value, &PropKey::from("next"))?;
             if next.is_function() {
                 return drain_protocol_iterator(realm, &value);
             }
-            let length = super::property::get_value_property(
-                realm,
-                &value,
-                &PropKey::from("length"),
-            )?;
+            let length =
+                super::property::get_value_property(realm, &value, &PropKey::from("length"))?;
             if length.is_undefined() {
                 return Err(realm.type_error("Value is not iterable"));
             }
@@ -85,22 +77,14 @@ pub fn iterable_items(realm: &mut Realm, value: JsValue) -> JsResult<Vec<JsValue
 /// Drain an iterator through its `next` method until done
 /// (ES2022 13.2.8.5 `IteratorToList`).
 fn drain_protocol_iterator(realm: &mut Realm, iterator: &JsValue) -> JsResult<Vec<JsValue>> {
-    let next = super::property::get_value_property(
-        realm,
-        iterator,
-        &PropKey::from("next"),
-    )?;
+    let next = super::property::get_value_property(realm, iterator, &PropKey::from("next"))?;
     if !next.is_function() {
         return Err(realm.type_error("Iterator has no next method"));
     }
     let mut items = Vec::new();
     loop {
         let result = call_value(realm, next.clone(), iterator.clone(), &[])?;
-        let done = super::property::get_value_property(
-            realm,
-            &result,
-            &PropKey::from("done"),
-        )?;
+        let done = super::property::get_value_property(realm, &result, &PropKey::from("done"))?;
         if super::to_boolean(&done) {
             break;
         }
@@ -117,17 +101,12 @@ fn drain_protocol_iterator(realm: &mut Realm, iterator: &JsValue) -> JsResult<Ve
 /// callable `next`.
 pub(crate) fn protocol_iterator(realm: &mut Realm, value: &JsValue) -> JsResult<JsValue> {
     let iterator_key = PropKey::Symbol(realm.well_known_symbol("iterator"));
-    let method =
-        super::property::get_value_property(realm, value, &iterator_key)?;
+    let method = super::property::get_value_property(realm, value, &iterator_key)?;
     if !method.is_function() {
         return Err(realm.type_error("Value is not iterable"));
     }
     let iterator = super::call::call_value(realm, method, value.clone(), &[])?;
-    let next = super::property::get_value_property(
-        realm,
-        &iterator,
-        &PropKey::from("next"),
-    )?;
+    let next = super::property::get_value_property(realm, &iterator, &PropKey::from("next"))?;
     if !next.is_function() {
         return Err(realm.type_error("Iterator has no next method"));
     }
@@ -152,7 +131,11 @@ pub(crate) fn advance_iterator(realm: &mut Realm, iterator: &JsValue) -> JsResul
                         Some(None)
                     }
                 }
-                ObjectKind::ArrayIterator { array, index, entries } => {
+                ObjectKind::ArrayIterator {
+                    array,
+                    index,
+                    entries,
+                } => {
                     let array = array.clone();
                     let current = *index;
                     let entries = *entries;
@@ -177,32 +160,19 @@ pub(crate) fn advance_iterator(realm: &mut Realm, iterator: &JsValue) -> JsResul
         }
         let is_generator = matches!(object.borrow().kind, ObjectKind::Generator(_));
         if is_generator {
-            drop(object);
             // Generators resume through `next`; the result object feeds the
             // same `done`/`value` protocol.
             let result = super::generator::generator_next(realm, iterator, &[])?;
-            let done = super::property::get_value_property(
-                realm,
-                &result,
-                &PropKey::from("done"),
-            )?;
+            let done = super::property::get_value_property(realm, &result, &PropKey::from("done"))?;
             if super::to_boolean(&done) {
                 return Ok(None);
             }
-            return super::property::get_value_property(
-                realm,
-                &result,
-                &PropKey::from("value"),
-            )
-            .map(Some);
+            return super::property::get_value_property(realm, &result, &PropKey::from("value"))
+                .map(Some);
         }
     }
     // Protocol path: `iterator.next()` then `done`/`value`.
-    let next = super::property::get_value_property(
-        realm,
-        iterator,
-        &PropKey::from("next"),
-    )?;
+    let next = super::property::get_value_property(realm, iterator, &PropKey::from("next"))?;
     if !next.is_function() {
         return Err(realm.type_error("Iterator has no next method"));
     }
@@ -211,8 +181,7 @@ pub(crate) fn advance_iterator(realm: &mut Realm, iterator: &JsValue) -> JsResul
     if super::to_boolean(&done) {
         return Ok(None);
     }
-    super::property::get_value_property(realm, &result, &PropKey::from("value"))
-        .map(Some)
+    super::property::get_value_property(realm, &result, &PropKey::from("value")).map(Some)
 }
 
 /// One step of the live array iterator (ES2022 23.1.5.1.1). Advances the

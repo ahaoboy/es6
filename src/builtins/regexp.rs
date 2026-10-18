@@ -84,7 +84,10 @@ pub(crate) fn make_regexp(realm: &mut Realm, source: &str, flags: &str) -> JsRes
 
 /// Sort flags into `dgimsuvy` order (ES2022 22.1.3.2.1).
 fn normalize_flags(flags: &str) -> String {
-    "dgimsuvy".chars().filter(|ch| flags.contains(*ch)).collect()
+    "dgimsuvy"
+        .chars()
+        .filter(|ch| flags.contains(*ch))
+        .collect()
 }
 
 fn regexp_data(realm: &Realm, value: &JsValue) -> JsResult<Rc<RegExpData>> {
@@ -135,12 +138,7 @@ fn exec(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
     };
     let range = matched.range();
     if global || sticky {
-        set(
-            realm,
-            this,
-            "lastIndex",
-            JsValue::number(range.end as f64),
-        )?;
+        set(realm, this, "lastIndex", JsValue::number(range.end as f64))?;
     }
     let mut values = vec![JsValue::string(input[range.clone()].to_owned())];
     for index in 1..=matched.captures.len() {
@@ -152,11 +150,7 @@ fn exec(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
         );
     }
     let result = realm.array(values);
-    define_value(
-        &result,
-        "index",
-        JsValue::number(range.start as f64),
-    );
+    define_value(&result, "index", JsValue::number(range.start as f64));
     define_value(&result, "input", JsValue::string(input));
     Ok(JsValue::Object(result))
 }

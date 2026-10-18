@@ -346,6 +346,8 @@ pub(crate) fn object_kind_name(object: &ObjectData) -> &'static str {
         ObjectKind::RegExp(_) => "RegExp",
         ObjectKind::Map(_) => "Map",
         ObjectKind::Set(_) => "Set",
+        ObjectKind::WeakMap(_) => "WeakMap",
+        ObjectKind::WeakSet(_) => "WeakSet",
         ObjectKind::Promise(_) => "Promise",
         ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
         ObjectKind::DataView(_) => "DataView",

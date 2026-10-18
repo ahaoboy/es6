@@ -165,7 +165,10 @@ impl Compiler {
         Ok(())
     }
 
-    pub(super) fn compile_var_declaration(&mut self, declaration: &VarDecl) -> Result<(), ParseError> {
+    pub(super) fn compile_var_declaration(
+        &mut self,
+        declaration: &VarDecl,
+    ) -> Result<(), ParseError> {
         for declarator in &declaration.declarations {
             // `var x;` is fully handled by hoisting. In particular it must not
             // overwrite a parameter binding with the same name.
@@ -580,7 +583,12 @@ impl Compiler {
         Ok(())
     }
 
-    pub(super) fn emit_cleanup(&mut self, env_depth: usize, stack_cleanup: usize, try_depth: usize) {
+    pub(super) fn emit_cleanup(
+        &mut self,
+        env_depth: usize,
+        stack_cleanup: usize,
+        try_depth: usize,
+    ) {
         for _ in 0..stack_cleanup {
             self.emit(Op::Pop);
         }
@@ -664,7 +672,10 @@ impl Compiler {
         Ok(())
     }
 
-    pub(super) fn compile_statements_in_scope(&mut self, statements: &[Stmt]) -> Result<usize, ParseError> {
+    pub(super) fn compile_statements_in_scope(
+        &mut self,
+        statements: &[Stmt],
+    ) -> Result<usize, ParseError> {
         self.compile_block(statements)?;
         Ok(self.position())
     }

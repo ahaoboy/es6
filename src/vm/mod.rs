@@ -23,10 +23,10 @@ use crate::object::ObjRef;
 use crate::runtime::Realm;
 use crate::value::{EnvRef, JsResult, JsValue};
 
-pub(crate) use frame::Frame;
-pub(crate) use frame::{RunOutcome, Step};
 pub use call::{call_value, construct_value};
 pub use error::{display_error, range_error, type_error};
+pub(crate) use frame::Frame;
+pub(crate) use frame::{RunOutcome, Step};
 pub use iter::iterable_items;
 pub use property::{get_value_property, set_value_property};
 
@@ -36,7 +36,6 @@ pub use crate::coerce::{
     to_uint32,
 };
 
-pub(crate) type SuspendedFrame = Rc<RefCell<Option<Box<Frame>>>>;
 pub(crate) type ValueStack = SmallVec<[JsValue; 4]>;
 pub(crate) type ArgumentStack = SmallVec<[JsValue; 4]>;
 
@@ -178,8 +177,7 @@ fn run_loop(
                 // The frame moves into the async-frame object owned by the
                 // promise reaction data, mirroring `JSStackFrame.cur_gc_obj`
                 // (quickjs.c:442).
-                if let Err(error) = crate::promise::await_value(realm, value, frame, completion)
-                {
+                if let Err(error) = crate::promise::await_value(realm, value, frame, completion) {
                     return (Err(error), None);
                 }
                 return (Ok(RunOutcome::Suspended), None);
@@ -262,14 +260,10 @@ fn run_thenable_job(realm: &mut Realm, promise: ObjRef, thenable: JsValue, then:
     let data: NativeData = Rc::new(RefCell::new(vec![JsValue::Object(record)]));
     let resolve_function =
         realm.native_function_data("", 1, data.clone(), thenable_resolve_element);
-    let reject_function =
-        realm.native_function_data("", 1, data.clone(), thenable_reject_element);
-    if let Err(error) = crate::vm::call_value(
-        realm,
-        then,
-        thenable,
-        &[resolve_function, reject_function],
-    ) {
+    let reject_function = realm.native_function_data("", 1, data.clone(), thenable_reject_element);
+    if let Err(error) =
+        crate::vm::call_value(realm, then, thenable, &[resolve_function, reject_function])
+    {
         // The `then` call threw before settling: reject the promise unless
         // one of the element functions already ran.
         let (promise, called) = thenable_record(realm, &data);

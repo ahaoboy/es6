@@ -3,7 +3,10 @@
 use super::*;
 
 impl<'a> Parser<'a> {
-    pub(super) fn parse_function_declaration(&mut self, is_async: bool) -> Result<Rc<Function>, ParseError> {
+    pub(super) fn parse_function_declaration(
+        &mut self,
+        is_async: bool,
+    ) -> Result<Rc<Function>, ParseError> {
         let span = self.span();
         self.expect_ident("function")?;
         let is_generator = self.eat_punct(Punct::Star)?;
@@ -30,7 +33,10 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    pub(super) fn parse_function_expression(&mut self, is_async: bool) -> Result<Rc<Function>, ParseError> {
+    pub(super) fn parse_function_expression(
+        &mut self,
+        is_async: bool,
+    ) -> Result<Rc<Function>, ParseError> {
         let span = self.span();
         self.expect_ident("function")?;
         let is_generator = self.eat_punct(Punct::Star)?;

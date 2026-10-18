@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use super::CALL_STACK;
-use crate::object::{Property, PropKey};
+use crate::object::{PropKey, Property};
 use crate::runtime::Realm;
 use crate::value::JsValue;
 

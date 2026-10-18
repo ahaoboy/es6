@@ -221,6 +221,10 @@ pub enum ResolvedProperty {
     Missing,
 }
 
+/// Object kinds. The `Frame`-carrying arms hold QuickJS-internal suspended
+/// activations; the `private_interfaces` allowance keeps the frame type
+/// crate-internal while the kind enum stays public.
+#[allow(private_interfaces)]
 pub enum ObjectKind {
     Ordinary,
     Array(ArrayData),
@@ -230,7 +234,10 @@ pub enum ObjectKind {
     BoxedBool(bool),
     Date(f64),
     RegExp(Rc<RegExpData>),
-    Iterator { items: Vec<JsValue>, index: usize },
+    Iterator {
+        items: Vec<JsValue>,
+        index: usize,
+    },
     /// Lazy array iterator, the equivalent of QuickJS'
     /// `JS_CLASS_ARRAY_ITERATOR`: reads elements from the live array on
     /// every `next` (ES2022 23.1.5.1).
@@ -279,6 +286,7 @@ pub struct GeneratorData {
 /// QuickJS suspends generators by stashing `JSStackFrame.cur_sp/cur_pc`
 /// inside the generator object (quickjs.c:20871); the whole `Frame` moves
 /// in and out here.
+#[allow(private_interfaces)]
 pub enum GeneratorState {
     SuspendedStart,
     Executing,
@@ -290,6 +298,7 @@ impl ObjectKind {
     /// Take the suspended frame out of an async-frame object, like the
     /// async resume path of `JS_CallInternal` (quickjs.c:18093).
     #[inline]
+    #[allow(private_interfaces)]
     pub fn take_async_frame(&mut self) -> Option<Box<crate::vm::Frame>> {
         match self {
             ObjectKind::AsyncFrame(frame) => frame.take(),

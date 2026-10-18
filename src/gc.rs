@@ -202,7 +202,9 @@ fn run_gc(registry: &mut Registry) {
     let mut pending: Vec<Entity> = Vec::new();
     while let Some(index) = queue.pop() {
         pending.clear();
-        visit_children(&registry.entities[index], &mut |child| pending.push(child.clone()));
+        visit_children(&registry.entities[index], &mut |child| {
+            pending.push(child.clone())
+        });
         for child in pending.drain(..) {
             if let Some(&child_index) = index_of.get(&child.key())
                 && !marked[child_index]
@@ -220,7 +222,10 @@ fn run_gc(registry: &mut Registry) {
     let mut survivors: Vec<Entity> = Vec::with_capacity(count);
     let mut survivor_keys: FxHashSet<EntityKey> =
         FxHashSet::with_capacity_and_hasher(count, Default::default());
-    for (index, entity) in std::mem::take(&mut registry.entities).into_iter().enumerate() {
+    for (index, entity) in std::mem::take(&mut registry.entities)
+        .into_iter()
+        .enumerate()
+    {
         if marked[index] {
             survivor_keys.insert(entity.key());
             survivors.push(entity);
@@ -233,6 +238,23 @@ fn run_gc(registry: &mut Registry) {
     }
     registry.entities = survivors;
     registry.keys = survivor_keys;
+
+    // Prune weak-collection entries whose keys died in this sweep, so their
+    // values become unreachable on the next cycle.
+    for entity in &registry.entities {
+        if let Entity::Object(object) = entity {
+            let mut data = object.borrow_mut();
+            match &mut data.kind {
+                ObjectKind::WeakMap(entries) => {
+                    entries.retain(|(key, _)| key.upgrade().is_some());
+                }
+                ObjectKind::WeakSet(values) => {
+                    values.retain(|key| key.upgrade().is_some());
+                }
+                _ => {}
+            }
+        }
+    }
 
     // QuickJS resets the threshold to `malloc_size + malloc_size/2`
     // (quickjs.c:1695); the entity-count equivalent keeps the same growth
@@ -367,7 +389,7 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                     for (key, value_item) in entries {
                         value(key, visit);
                         value(value_item, visit);
-                }
+                    }
                 }
                 ObjectKind::Set(values) => {
                     for item in values {
@@ -376,16 +398,15 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                 }
                 // Weak collections: only entries whose key is still alive
                 // keep their values reachable, so dead-key entries cannot
-                // retain garbage.
+                // retain garbage. Pruning happens after the sweep.
                 ObjectKind::WeakMap(entries) => {
-                    entries.retain(|(key, _)| key.upgrade().is_some());
-                    for (_, entry_value) in entries {
-                        value(entry_value, visit);
+                    for (key, entry_value) in entries {
+                        if key.upgrade().is_some() {
+                            value(entry_value, visit);
+                        }
                     }
                 }
-                ObjectKind::WeakSet(values) => {
-                    values.retain(|key| key.upgrade().is_some());
-                }
+                ObjectKind::WeakSet(_) => {}
                 ObjectKind::Promise(inner) => visit_promise(inner, visit),
                 ObjectKind::ArrayBuffer(_) => {}
                 ObjectKind::DataView(view) => {

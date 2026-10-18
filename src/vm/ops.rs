@@ -9,10 +9,9 @@ use std::rc::Rc;
 use super::frame::{EventLoop, Frame, Handler, Step};
 use super::{ArgumentStack, ValueStack, constant_string, constant_strings};
 use crate::bytecode::{CompareOp, Constant, FunctionDef, Op};
-use crate::object::{
-    Object, ObjectData, ObjectKind, Property, PropKey, RegExpData,
-};use crate::value::JsValue;
+use crate::object::{Object, ObjectData, ObjectKind, PropKey, Property, RegExpData};
 use crate::runtime::Realm;
+use crate::value::JsValue;
 use crate::value::{Env, EnvRef, JsResult};
 
 use super::call::{
@@ -609,9 +608,11 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         Op::InstanceOf => {
             let constructor = pop(&mut frame.stack)?;
             let value = pop(&mut frame.stack)?;
-            frame.stack.push(JsValue::Bool(
-                crate::coerce::instance_of(realm, &value, &constructor)?,
-            ));
+            frame.stack.push(JsValue::Bool(crate::coerce::instance_of(
+                realm,
+                &value,
+                &constructor,
+            )?));
         }
         Op::Not => {
             let value = pop(&mut frame.stack)?;
@@ -625,13 +626,17 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         }
         Op::Pos => {
             let value = pop(&mut frame.stack)?;
-            frame.stack.push(JsValue::number(super::to_numeric(realm, value)?));
+            frame
+                .stack
+                .push(JsValue::number(super::to_numeric(realm, value)?));
         }
         Op::BitNot => {
             let value = pop(&mut frame.stack)?;
             frame
                 .stack
-                .push(JsValue::Int(!super::to_int32(super::to_numeric(realm, value)?)));
+                .push(JsValue::Int(!super::to_int32(super::to_numeric(
+                    realm, value,
+                )?)));
         }
         Op::TypeOf => {
             let value = pop(&mut frame.stack)?;
@@ -915,7 +920,10 @@ fn binary_number(
 ) -> JsResult<()> {
     let right = pop(&mut frame.stack)?;
     let left = pop(&mut frame.stack)?;
-    let value = operation(super::to_numeric(realm, left)?, super::to_numeric(realm, right)?);
+    let value = operation(
+        super::to_numeric(realm, left)?,
+        super::to_numeric(realm, right)?,
+    );
     frame.stack.push(JsValue::number(value));
     Ok(())
 }
@@ -1011,9 +1019,7 @@ fn pop_array(stack: &mut ValueStack) -> JsResult<Vec<JsValue>> {
 fn property_key_from_constant(definition: &FunctionDef, index: u32) -> JsResult<PropKey> {
     match definition.constants.get(index as usize) {
         Some(Constant::String(value)) => Ok(crate::object::key_from_string(value.clone())),
-        Some(Constant::Number(value)) => Ok(PropKey::Str(Rc::from(
-            super::format_number(*value),
-        ))),
+        Some(Constant::Number(value)) => Ok(PropKey::Str(Rc::from(super::format_number(*value)))),
         _ => Err(JsValue::string("InternalError: invalid property constant")),
     }
 }
@@ -1029,7 +1035,8 @@ fn constant_value(
         Some(Constant::String(value)) => Ok(JsValue::String(value.clone())),
         Some(Constant::Function(function)) => Ok(realm.make_js_function(
             function.clone(),
-            env.expect("function constant requires an environment").clone(),
+            env.expect("function constant requires an environment")
+                .clone(),
             None,
         )),
         Some(Constant::Class(class)) => {

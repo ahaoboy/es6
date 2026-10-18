@@ -12,7 +12,7 @@ use crate::object::{ObjectData, ObjectKind, Property};
 use crate::value::JsValue;
 
 pub fn install(realm: &mut Realm) {
-    let prototype = realm.object();
+    let prototype = realm.weak_map_proto.clone();
     let constructor = install_constructor(realm, "WeakMap", 0, weak_map, &prototype);
     let _ = constructor;
     define_method(realm, &prototype, "get", 1, get);
@@ -20,7 +20,7 @@ pub fn install(realm: &mut Realm) {
     define_method(realm, &prototype, "has", 1, has);
     define_method(realm, &prototype, "delete", 1, delete);
 
-    let set_prototype = realm.object();
+    let set_prototype = realm.weak_set_proto.clone();
     let set_constructor = install_constructor(realm, "WeakSet", 0, weak_set, &set_prototype);
     let _ = set_constructor;
     define_method(realm, &set_prototype, "add", 1, set_add);
@@ -31,7 +31,7 @@ pub fn install(realm: &mut Realm) {
 fn weak_map(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = Rc::new(RefCell::new(ObjectData {
         props: Default::default(),
-        prototype: Some(realm.object_proto.clone()),
+        prototype: Some(realm.weak_map_proto.clone()),
         kind: ObjectKind::WeakMap(Vec::new()),
         extensible: true,
         class_name: "WeakMap",
@@ -62,7 +62,7 @@ fn weak_map(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResu
 fn weak_set(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = Rc::new(RefCell::new(ObjectData {
         props: Default::default(),
-        prototype: Some(realm.object_proto.clone()),
+        prototype: Some(realm.weak_set_proto.clone()),
         kind: ObjectKind::WeakSet(Vec::new()),
         extensible: true,
         class_name: "WeakSet",
@@ -85,15 +85,16 @@ fn weak_set(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResu
     Ok(JsValue::Object(object))
 }
 
-fn same_key(existing: &std::rc::Weak<RefCell<crate::object::ObjectData>>, key: &crate::object::ObjRef) -> bool {
-    existing
-        .as_ptr()
-        .eq(&Rc::as_ptr(key))
+fn same_key(
+    existing: &std::rc::Weak<RefCell<crate::object::ObjectData>>,
+    key: &crate::object::ObjRef,
+) -> bool {
+    existing.as_ptr().eq(&Rc::as_ptr(key))
 }
 
 fn require_key(realm: &Realm, value: &JsValue) -> JsResult<crate::object::ObjRef> {
     match value {
-        JsValue::Object(object) => Ok(object.into_ref()),
+        JsValue::Object(object) => Ok(object.clone()),
         _ => Err(realm.type_error("Invalid value used as weak collection key")),
     }
 }

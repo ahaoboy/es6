@@ -67,7 +67,13 @@ pub fn install(realm: &mut Realm) {
     define_method(realm, &prototype, "getUTCHours", 0, get_utc_hours);
     define_method(realm, &prototype, "getUTCMinutes", 0, get_utc_minutes);
     define_method(realm, &prototype, "getUTCSeconds", 0, get_utc_seconds);
-    define_method(realm, &prototype, "getUTCMilliseconds", 0, get_utc_milliseconds);
+    define_method(
+        realm,
+        &prototype,
+        "getUTCMilliseconds",
+        0,
+        get_utc_milliseconds,
+    );
     define_method(realm, &prototype, "setUTCFullYear", 3, set_utc_full_year);
     define_method(realm, &prototype, "setUTCMonth", 2, set_utc_month);
     define_method(realm, &prototype, "setUTCDate", 1, set_utc_date);
@@ -195,10 +201,7 @@ fn to_date_string_part(
     let weekday = weekday_of(value);
     Ok(JsValue::string(format!(
         "{} {} {:02} {:04}",
-        WEEKDAYS[weekday],
-        MONTHS[month as usize],
-        day,
-        year
+        WEEKDAYS[weekday], MONTHS[month as usize], day, year
     )))
 }
 
@@ -359,7 +362,7 @@ fn field_value(value: f64, field: Field) -> f64 {
         Field::Hours => (time / 3_600_000) as f64,
         Field::Minutes => ((time / 60_000) % 60) as f64,
         Field::Seconds => ((time / 1000) % 60) as f64,
-        Field::Milliseconds => (value.rem_euclid(1000.0)) as f64,
+        Field::Milliseconds => value.rem_euclid(1000.0),
         Field::Day => weekday_of(value) as f64,
     }
 }
@@ -608,11 +611,7 @@ fn parse_time(value: &str) -> Option<f64> {
     Some((hours * 3_600.0 + minutes * 60.0 + seconds) * 1000.0 + milliseconds)
 }
 
-fn utc(
-    realm: &mut Realm,
-    _this: &JsValue,
-    arguments: &[JsValue],
-) -> JsResult<JsValue> {
+fn utc(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let year = arg_number(realm, arguments, 0)?;
     let month = arg_number_or(realm, arguments, 1, 0.0)?;
     let day = arg_number_or(realm, arguments, 2, 1.0)?;
@@ -621,6 +620,12 @@ fn utc(
     let seconds = arg_number_or(realm, arguments, 5, 0.0)?;
     let milliseconds = arg_number_or(realm, arguments, 6, 0.0)?;
     Ok(JsValue::number(make_date(
-        year, month, day, hours, minutes, seconds, milliseconds,
+        year,
+        month,
+        day,
+        hours,
+        minutes,
+        seconds,
+        milliseconds,
     )))
 }

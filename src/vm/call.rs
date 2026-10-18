@@ -8,10 +8,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::ArgumentStack;
 use super::frame::{Frame, RunOutcome};
-use super::{ArgumentStack};
 use crate::bytecode::{ClassDef, Constant, FunctionDef};
-use crate::object::{ObjectData, ObjectKind, Property, PropKey};
+use crate::object::{ObjectData, ObjectKind, PropKey, Property};
 use crate::runtime::Realm;
 use crate::value::{Env, EnvRef, JsResult, JsValue};
 
@@ -145,11 +145,8 @@ pub fn construct_value(
     {
         return Err(realm.type_error("Value is not a constructor"));
     }
-    let prototype = super::property::get_value_property(
-        realm,
-        &callee,
-        &PropKey::from("prototype"),
-    )?;
+    let prototype =
+        super::property::get_value_property(realm, &callee, &PropKey::from("prototype"))?;
     let prototype = match prototype {
         JsValue::Object(object) => object,
         _ => realm.object_proto.clone(),
@@ -202,20 +199,13 @@ pub(crate) fn copy_this_fields(this: &JsValue, env: &EnvRef, size: usize) {
 /// Super property lookup on the parent prototype, like the
 /// `OP_get_field_ic`/`OP_array_from` super path in `JS_CallInternal`
 /// (quickjs.c:18051): home-object prototype plus receiver-bound get.
-pub(crate) fn super_function(
-    realm: &mut Realm,
-    frame: &Frame,
-    key: &PropKey,
-) -> JsResult<JsValue> {
+pub(crate) fn super_function(realm: &mut Realm, frame: &Frame, key: &PropKey) -> JsResult<JsValue> {
     let callee = frame
         .callee
         .clone()
         .ok_or_else(|| realm.reference_error("super is not available"))?;
-    let prototype = super::property::get_value_property(
-        realm,
-        &callee,
-        &PropKey::from("__super_proto__"),
-    )?;
+    let prototype =
+        super::property::get_value_property(realm, &callee, &PropKey::from("__super_proto__"))?;
     if prototype.is_undefined() {
         return Err(realm.reference_error("super is not available"));
     }

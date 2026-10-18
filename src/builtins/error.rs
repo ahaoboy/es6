@@ -20,9 +20,8 @@ pub fn install(realm: &mut Realm) {
         let prototype = realm.error_prototype(name);
         // Per-type constructor: `TypeError("x")` builds a TypeError whether
         // called as a function or with `new` (ES2022 20.5.5.1).
-        let function = realm.native_function(name, 1, {
-            let name = name;
-            move |realm, _this, arguments| error_native(realm, name, arguments)
+        let function = realm.native_function(name, 1, move |realm, _this, arguments| {
+            error_native(realm, name, arguments)
         });
         if let Some(object) = function.as_object() {
             object.set("prototype", JsValue::Object(prototype.clone()));
@@ -65,10 +64,9 @@ fn error_constructor(
             if let JsValue::Object(options) = arg(arguments, 1) {
                 let cause = get(realm, &JsValue::Object(options.clone()), "cause")?;
                 if !cause.is_undefined() {
-                    object.borrow_mut().define(
-                        "cause",
-                        crate::object::Property::data(cause),
-                    );
+                    object
+                        .borrow_mut()
+                        .define("cause", crate::object::Property::data(cause));
                 }
             }
         }

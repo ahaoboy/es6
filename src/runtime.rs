@@ -145,6 +145,8 @@ pub struct Realm {
     pub data_view_proto: ObjRef,
     /// `%GeneratorPrototype%` (ES2022 27.5.2).
     pub generator_proto: ObjRef,
+    pub weak_map_proto: ObjRef,
+    pub weak_set_proto: ObjRef,
     pub typed_array_protos: std::collections::HashMap<crate::object::TypedArrayKind, ObjRef>,
     pub symbol_counter: u32,
     pub symbols: Vec<Rc<str>>,
@@ -184,6 +186,8 @@ impl Realm {
         let array_buffer_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let data_view_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let generator_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
+        let weak_map_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
+        let weak_set_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let typed_array_protos = [
             crate::object::TypedArrayKind::Uint8,
             crate::object::TypedArrayKind::Uint8Clamped,
@@ -228,6 +232,8 @@ impl Realm {
             array_buffer_proto,
             data_view_proto,
             generator_proto,
+            weak_map_proto,
+            weak_set_proto,
             typed_array_protos,
             symbol_counter: 1,
             symbols: Vec::new(),
@@ -284,6 +290,7 @@ impl Realm {
     /// Wrap a suspended `async` VM frame in an object, mirroring the
     /// QuickJS `JSAsyncFunction` GC object that owns the suspended stack
     /// (`JSStackFrame.cur_gc_obj`, quickjs.c:442).
+    #[allow(private_interfaces)]
     pub fn async_frame(&self, frame: Box<crate::vm::Frame>) -> ObjRef {
         let mut data = ObjectData::ordinary(None);
         data.kind = ObjectKind::AsyncFrame(Some(frame));
@@ -382,7 +389,12 @@ impl Realm {
     /// Create a generator object (ES2022 27.5.1): the function plus its
     /// creation-time receiver and arguments, suspended at the start, like
     /// QuickJS `JS_CLASS_GENERATOR`.
-    pub fn generator(&self, function: Rc<JsFunction>, this: JsValue, arguments: Vec<JsValue>) -> ObjRef {
+    pub fn generator(
+        &self,
+        function: Rc<JsFunction>,
+        this: JsValue,
+        arguments: Vec<JsValue>,
+    ) -> ObjRef {
         let mut data = ObjectData::ordinary(Some(self.generator_proto.clone()));
         data.kind = ObjectKind::Generator(crate::object::GeneratorData {
             function,
@@ -412,8 +424,7 @@ impl Realm {
         name: &str,
         length: u32,
         data: crate::object::NativeData,
-        function: impl Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue>
-            + 'static,
+        function: impl Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue> + 'static,
     ) -> JsValue {
         let data = crate::gc::register_data(data);
         let function = Rc::new(JsFunction {
@@ -670,7 +681,11 @@ fn iterator_next(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> J
             }
             // Live array iterator (ES2022 23.1.5.1.1): reads the current
             // element every step.
-            ObjectKind::ArrayIterator { array, index, entries } => {
+            ObjectKind::ArrayIterator {
+                array,
+                index,
+                entries,
+            } => {
                 let array = array.clone();
                 let current = *index;
                 let entries = *entries;
@@ -684,8 +699,7 @@ fn iterator_next(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> J
                         .unwrap_or(JsValue::Undefined);
                     *index += 1;
                     if entries {
-                        let entry =
-                            realm.array(vec![JsValue::number(current as f64), value]);
+                        let entry = realm.array(vec![JsValue::number(current as f64), value]);
                         (JsValue::Object(entry), false)
                     } else {
                         (value, false)

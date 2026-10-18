@@ -112,9 +112,9 @@ fn radix_digits<'a>(value: &'a str, prefix: &str, radix: u32) -> Option<&'a str>
 }
 
 fn radix_value(digits: &str, radix: u32) -> f64 {
-    digits
-        .chars()
-        .fold(0.0, |value, ch| value * f64::from(radix) + ch.to_digit(radix).unwrap() as f64)
+    digits.chars().fold(0.0, |value, ch| {
+        value * f64::from(radix) + ch.to_digit(radix).unwrap() as f64
+    })
 }
 
 /// The exact ES2022 decimal grammar accepted by `StringToNumber`.
@@ -160,8 +160,16 @@ pub fn trim_ecma_whitespace(value: &str) -> &str {
     value.trim_matches(|ch: char| {
         matches!(
             ch,
-            '\u{0009}' | '\u{000B}' | '\u{000C}' | '\u{0020}' | '\u{00A0}' | '\u{FEFF}'
-                | '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}'
+            '\u{0009}'
+                | '\u{000B}'
+                | '\u{000C}'
+                | '\u{0020}'
+                | '\u{00A0}'
+                | '\u{FEFF}'
+                | '\u{000A}'
+                | '\u{000D}'
+                | '\u{2028}'
+                | '\u{2029}'
         )
     })
 }
@@ -245,11 +253,7 @@ pub fn to_string(realm: &mut Realm, value: JsValue) -> JsResult<String> {
             // Ordinary objects stringify through `ToPrimitive` with the
             // string hint, so user `toString`/`valueOf` methods run
             // (`JS_ToStringHintFree` in QuickJS).
-            let primitive = to_primitive_hint(
-                realm,
-                JsValue::Object(object),
-                Hint::String,
-            )?;
+            let primitive = to_primitive_hint(realm, JsValue::Object(object), Hint::String)?;
             match primitive {
                 JsValue::Object(_) => Ok("[object Object]".into()),
                 value => to_string(realm, value),
@@ -322,7 +326,7 @@ pub fn format_number(value: f64) -> String {
         }
         return expand_exponent(mantissa, exponent);
     }
-    if exponent >= -6 && exponent < 21 {
+    if (-6..21).contains(&exponent) {
         return expand_exponent(mantissa, exponent);
     }
     // ECMAScript requires an explicit exponent sign: `1e+21`.
@@ -344,7 +348,9 @@ fn strip_trailing_zero_fraction(text: &str) -> String {
 fn expand_exponent(mantissa: &str, exponent: i32) -> String {
     let negative = mantissa.starts_with('-');
     let digits: String = mantissa.chars().filter(|ch| ch.is_ascii_digit()).collect();
-    let point = mantissa.find('.').map(|index| index - usize::from(negative));
+    let point = mantissa
+        .find('.')
+        .map(|index| index - usize::from(negative));
     let fraction = point.map_or(0, |point| mantissa.len() - point - 1);
     let point = digits.len() as i32 - fraction as i32 + exponent;
     let mut result = String::new();
@@ -372,11 +378,13 @@ fn expand_exponent(mantissa: &str, exponent: i32) -> String {
 pub fn to_property_key(realm: &mut Realm, value: JsValue) -> JsResult<PropKey> {
     match value {
         JsValue::String(value) => Ok(crate::object::key_from_string(value)),
-        JsValue::Int(value) => Ok(if (value as i64) >= 0 && (value as u64) <= MAX_ARRAY_INDEX {
-            PropKey::Index(value as usize)
-        } else {
-            PropKey::Str(Rc::from(value.to_string()))
-        }),
+        JsValue::Int(value) => Ok(
+            if (value as i64) >= 0 && (value as u64) <= MAX_ARRAY_INDEX {
+                PropKey::Index(value as usize)
+            } else {
+                PropKey::Str(Rc::from(value.to_string()))
+            },
+        ),
         JsValue::Float(value)
             if value.fract() == 0.0 && value >= 0.0 && value <= MAX_ARRAY_INDEX as f64 =>
         {
@@ -418,11 +426,7 @@ pub enum Hint {
 /// ECMAScript `ToPrimitive` (ES2022 7.1.1), mirroring the exotic-object
 /// fast paths and method probing of `JS_ToPrimitive` in QuickJS
 /// (`js_to_primitive`).
-pub fn to_primitive_hint(
-    realm: &mut Realm,
-    value: JsValue,
-    hint: Hint,
-) -> JsResult<JsValue> {
+pub fn to_primitive_hint(realm: &mut Realm, value: JsValue, hint: Hint) -> JsResult<JsValue> {
     let JsValue::Object(object) = value else {
         return Ok(value);
     };

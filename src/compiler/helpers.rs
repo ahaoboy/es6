@@ -469,7 +469,7 @@ pub(super) fn expr_is_stable(expression: &Expr) -> bool {
         | ExprKind::Spread(_)
         | ExprKind::Await(_)
         | ExprKind::Yield(_) => false,
-        | ExprKind::YieldStar(_) => false,
+        ExprKind::YieldStar(_) => false,
     }
 }
 

@@ -274,12 +274,8 @@ impl<'a> Parser<'a> {
                 || self.current.is_punct(Punct::RBrace)
                 || self.current.is_punct(Punct::Comma)
                 || self.current.is_punct(Punct::Colon);
-            let argument = if delegate {
-                let argument = self.parse_assignment()?;
-                Some(Box::new(argument))
-            } else if same_line && !terminator {
-                let argument = self.parse_assignment()?;
-                Some(Box::new(argument))
+            let argument = if delegate || (same_line && !terminator) {
+                Some(Box::new(self.parse_assignment()?))
             } else {
                 None
             };

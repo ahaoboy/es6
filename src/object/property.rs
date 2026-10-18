@@ -144,11 +144,10 @@ impl ObjectData {
         };
         if let ObjectKind::TypedArray(data) = &self.kind
             && let Some(index) = key_to_index(text)
+            && index < data.length
         {
-            if index < data.length {
-                data.set(realm, index, value);
-                return Ok(Some(()));
-            }
+            data.set(realm, index, value);
+            return Ok(Some(()));
         }
         if let ObjectKind::Array(data) = &mut self.kind {
             if text.as_ref() == "length" {

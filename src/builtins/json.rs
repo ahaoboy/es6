@@ -51,11 +51,8 @@ fn stringify(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsRes
 fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<bool> {
     // `toJSON` protocol first, exactly like `js_json_check` in QuickJS.
     if let JsValue::Object(_) = value {
-        let method = crate::vm::get_value_property(
-            realm,
-            value,
-            &crate::object::PropKey::from("toJSON"),
-        )?;
+        let method =
+            crate::vm::get_value_property(realm, value, &crate::object::PropKey::from("toJSON"))?;
         if method.is_function() {
             let result = crate::vm::call_value(realm, method, value.clone(), &[])?;
             return to_json(realm, &result, output);
@@ -149,8 +146,7 @@ fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<
                         let Some(key_text) = key.to_rc_string() else {
                             continue;
                         };
-                        let item =
-                            crate::vm::get_value_property(realm, value, &key)?;
+                        let item = crate::vm::get_value_property(realm, value, &key)?;
                         if item.is_undefined() || item.is_function() || item.is_symbol() {
                             continue;
                         }
