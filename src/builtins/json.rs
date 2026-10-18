@@ -95,29 +95,26 @@ fn to_json(realm: &mut Realm, value: &JsValue, output: &mut String) -> JsResult<
                 ObjectKind::Function(_) => Ok(false),
                 ObjectKind::Array(array) => {
                     let items = array.items.clone();
+                    let length = object.borrow().array_len().unwrap_or(items.len());
                     drop(data);
                     output.push('[');
                     let mut first = true;
-                    for item in items.iter().flatten() {
+                    // Holes and `undefined` elements serialize as null;
+                    // the dense prefix plus recorded length cover all
+                    // elements (ES2022 25.5.2.4).
+                    for index in 0..length {
                         if !first {
                             output.push(',');
                         }
                         first = false;
-                        if !to_json(realm, item, output)? {
-                            // holes, undefined, symbols and functions
-                            output.push_str("null");
+                        match items.get(index).cloned().flatten() {
+                            Some(item) => {
+                                if !to_json(realm, &item, output)? {
+                                    output.push_str("null");
+                                }
+                            }
+                            None => output.push_str("null"),
                         }
-                    }
-                    // Dense prefix ends before `length`: trailing holes.
-                    let items_len = items.len();
-                    drop(items);
-                    let length = object.borrow().array_len().unwrap_or(items_len);
-                    for _ in items_len..length {
-                        if !first {
-                            output.push(',');
-                        }
-                        first = false;
-                        output.push_str("null");
                     }
                     output.push(']');
                     Ok(true)

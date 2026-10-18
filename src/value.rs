@@ -174,6 +174,15 @@ impl JsValue {
     }
 
     pub fn number(value: f64) -> Self {
+        // Negative zero must stay a float: collapsing it into `Int(0)`
+        // would lose the sign bit (ES2022 6.1.6.1.3, `Object.is(0, -0)`).
+        if value == 0.0 {
+            return if value.is_sign_negative() {
+                Self::Float(value)
+            } else {
+                Self::Int(0)
+            };
+        }
         if value.is_finite()
             && value.fract() == 0.0
             && value >= i32::MIN as f64

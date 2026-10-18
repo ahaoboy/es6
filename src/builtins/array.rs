@@ -94,6 +94,20 @@ fn of(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsV
 
 fn push(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = array_object(realm, this)?;
+    // Dense arrays append in place, like QuickJS' `add_fast_array_element`
+    // (quickjs.c:10479); only non-array receivers fall back to the generic
+    // property path.
+    {
+        let reference = object.to_ref();
+        let mut data = reference.borrow_mut();
+        if let crate::object::ObjectKind::Array(array) = &mut data.kind {
+            for argument in arguments {
+                array.items.push(Some(argument.clone()));
+            }
+            array.length = array.items.len();
+            return Ok(JsValue::number(array.length as f64));
+        }
+    }
     let mut items = array_items(realm, &object)?;
     items.extend_from_slice(arguments);
     let length = items.len();
@@ -103,6 +117,16 @@ fn push(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<Js
 
 fn pop(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = array_object(realm, this)?;
+    // Dense arrays pop in place (quickjs.c:44121 `js_array_pop`).
+    {
+        let reference = object.to_ref();
+        let mut data = reference.borrow_mut();
+        if let crate::object::ObjectKind::Array(array) = &mut data.kind {
+            let value = array.items.pop().flatten().unwrap_or(JsValue::Undefined);
+            array.length = array.items.len();
+            return Ok(value);
+        }
+    }
     let mut items = array_items(realm, &object)?;
     let value = items.pop().unwrap_or(JsValue::Undefined);
     set_array_items(realm, &object, items);
@@ -111,6 +135,19 @@ fn pop(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<Js
 
 fn shift(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = array_object(realm, this)?;
+    {
+        let reference = object.to_ref();
+        let mut data = reference.borrow_mut();
+        if let crate::object::ObjectKind::Array(array) = &mut data.kind {
+            let value = if array.items.is_empty() {
+                JsValue::Undefined
+            } else {
+                array.items.remove(0).unwrap_or(JsValue::Undefined)
+            };
+            array.length = array.items.len();
+            return Ok(value);
+        }
+    }
     let mut items = array_items(realm, &object)?;
     let value = if items.is_empty() {
         JsValue::Undefined
@@ -123,6 +160,17 @@ fn shift(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> JsResult<
 
 fn unshift(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
     let object = array_object(realm, this)?;
+    {
+        let reference = object.to_ref();
+        let mut data = reference.borrow_mut();
+        if let crate::object::ObjectKind::Array(array) = &mut data.kind {
+            for (offset, argument) in arguments.iter().enumerate() {
+                array.items.insert(offset, Some(argument.clone()));
+            }
+            array.length = array.items.len();
+            return Ok(JsValue::number(array.length as f64));
+        }
+    }
     let mut items = arguments.to_vec();
     items.extend(array_items(realm, &object)?);
     let length = items.len();

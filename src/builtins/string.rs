@@ -475,11 +475,12 @@ fn replace_impl(
             }
         };
         if let Some(regexp) = regexp {
-            let all = all || regexp.flags.contains('g');
-            if !all && regexp.flags.contains('y') {
-                // Only the first match participates, anchored at lastIndex.
+            let global = regexp.flags.contains('g');
+            // `replaceAll` requires the global flag (ES2022 22.1.3.18).
+            if all && !global {
+                return Err(realm.type_error("replaceAll must be called with a global RegExp"));
             }
-            return replace_regex(realm, &value, &regexp, replacement, all);
+            return replace_regex(realm, &value, &regexp, replacement, global);
         }
     }
     let needle = crate::vm::to_string(realm, search)?;
@@ -670,9 +671,19 @@ fn match_(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<
     };
     if regexp.flags.contains('g') {
         let mut matches = Vec::new();
+        // A global match resets `lastIndex` before and after, but only on
+        // a real RegExp argument (ES2022 22.2.5.2 `Symbol.match`).
+        let regexp_object = arg(arguments, 0);
+        let is_object = regexp_data(&regexp_object).is_some();
+        if is_object {
+            set(realm, &regexp_object, "lastIndex", JsValue::number(0.0))?;
+        }
         for matched in regexp.regex.find_iter(&value) {
             let range = matched.range();
             matches.push(JsValue::string(value[range].to_owned()));
+        }
+        if is_object {
+            set(realm, &regexp_object, "lastIndex", JsValue::number(0.0))?;
         }
         return Ok(if matches.is_empty() {
             JsValue::Null

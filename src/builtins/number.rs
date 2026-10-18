@@ -445,10 +445,32 @@ fn to_fixed(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResul
     }
     let negative = value.is_sign_negative();
     let (raw, point) = decimal_digits(value);
-    let keep = (point + digits as i32).max(1) as usize;
-    let (rounded, point) = round_digits(&raw, point, keep);
+    let keep = point + digits as i32;
+    let (rounded, point) = if keep <= 0 {
+        // The first significant digit lies at or after the rounding
+        // position; only an exact half rounds away from zero.
+        let round_up = keep == 0 && raw.as_bytes().first().is_some_and(|digit| *digit > b'4');
+        if round_up {
+            ("1".to_string(), 1 - digits as i32)
+        } else {
+            ("0".to_string(), 1)
+        }
+    } else {
+        round_digits(&raw, point, keep as usize)
+    };
+    // For values below 1, `render_fixed` counts significant digits after
+    // the leading zero run; subtract those zeros from the requested number
+    // of fraction digits.
+    let render_fraction = if point <= 0 {
+        digits.saturating_sub(point.unsigned_abs() as usize)
+    } else {
+        digits
+    };
     Ok(JsValue::string(render_fixed(
-        &rounded, point, negative, digits,
+        &rounded,
+        point,
+        negative,
+        render_fraction,
     )))
 }
 

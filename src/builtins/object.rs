@@ -290,7 +290,7 @@ fn create(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult
 }
 
 fn get_proto_of(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let object = require_object(realm, &arg(arguments, 0))?;
+    let object = to_object(realm, arg(arguments, 0))?;
     Ok(object
         .to_ref()
         .borrow()
@@ -424,18 +424,32 @@ fn descriptor_from_object(
     })
 }
 
+fn to_object(realm: &mut Realm, value: JsValue) -> JsResult<Object> {
+    match value {
+        JsValue::Object(object) => Ok(Object::from_ref(object)),
+        JsValue::String(value) => Ok(Object::from_ref(realm.boxed_string(value))),
+        JsValue::Int(value) => Ok(Object::from_ref(realm.boxed_number(value as f64))),
+        JsValue::Float(value) => Ok(Object::from_ref(realm.boxed_number(value))),
+        JsValue::Bool(value) => Ok(Object::from_ref(realm.boxed_bool(value))),
+        JsValue::Null | JsValue::Undefined => {
+            Err(realm.type_error("Cannot convert undefined or null to object"))
+        }
+        JsValue::Symbol(_) => Err(realm.type_error("Cannot convert a Symbol to an object")),
+    }
+}
+
 fn get_own_property_descriptor(
     realm: &mut Realm,
     _this: &JsValue,
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
-    let object = require_object(realm, &arg(arguments, 0))?;
+    let object = to_object(realm, arg(arguments, 0))?;
     let key = crate::vm::to_property_key(realm, arg(arguments, 1))?;
     let value = match object.to_ref().borrow().get_own_value(&key) {
         Some(value) => value,
         None => return Ok(JsValue::Undefined),
     };
-    let (writable, enumerable, configurable, get, set) = {
+    let (writable, enumerable, configurable, get, set, accessor) = {
         let data = object.to_ref();
         let data = data.borrow();
         match data.props.get(&key) {
@@ -445,36 +459,35 @@ fn get_own_property_descriptor(
                 property.configurable,
                 property.get.as_deref().cloned(),
                 property.set.as_deref().cloned(),
+                property.is_accessor(),
             ),
             // Virtual properties: dense elements and exotic built-in
             // fields, with the attribute sets of ES2022 10.4.
             None => match (&data.kind, key.index(), key.as_str()) {
-                (ObjectKind::Array(_), _, Some("length")) => (true, false, false, None, None),
-                (ObjectKind::Array(_) | ObjectKind::BoxedString(_), Some(_), _) => {
-                    (true, true, true, None, None)
+                (ObjectKind::Array(_), _, Some("length")) => {
+                    (true, false, false, None, None, false)
                 }
+                (ObjectKind::Array(_), Some(_), _) => (true, true, true, None, None, false),
+                (ObjectKind::BoxedString(_), Some(_), _) => (false, true, false, None, None, false),
                 (ObjectKind::BoxedString(_), _, Some("length")) => {
-                    (false, false, false, None, None)
+                    (false, false, false, None, None, false)
                 }
                 (
                     ObjectKind::TypedArray(_),
                     _,
                     Some("length" | "byteLength" | "byteOffset" | "buffer"),
-                ) => (false, false, false, None, None),
-                (ObjectKind::TypedArray(_), Some(_), _) => (true, true, false, None, None),
-                _ => (true, true, true, None, None),
+                ) => (false, false, false, None, None, false),
+                (ObjectKind::TypedArray(_), Some(_), _) => (true, true, false, None, None, false),
+                _ => (true, true, true, None, None, false),
             },
         }
     };
     let descriptor = realm.object();
-    if get.is_some() || set.is_some() {
-        // Accessor descriptors carry only `get`/`set` (ES2022 6.2.5.1).
-        if let Some(get) = get {
-            define_value(&descriptor, "get", get);
-        }
-        if let Some(set) = set {
-            define_value(&descriptor, "set", set);
-        }
+    if accessor {
+        // Accessor descriptors always expose both `get` and `set`; absent
+        // functions are `undefined` (ES2022 6.2.5.1).
+        define_value(&descriptor, "get", get.unwrap_or(JsValue::Undefined));
+        define_value(&descriptor, "set", set.unwrap_or(JsValue::Undefined));
     } else {
         define_value(&descriptor, "value", value);
         define_value(&descriptor, "writable", JsValue::Bool(writable));
@@ -489,7 +502,7 @@ fn get_own_property_descriptors(
     _this: &JsValue,
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
-    let object = require_object(realm, &arg(arguments, 0))?;
+    let object = to_object(realm, arg(arguments, 0))?;
     let result = realm.object();
     let keys = object.to_ref().borrow().own_keys();
     for key in keys {
@@ -514,7 +527,7 @@ fn get_own_property_names(
     _this: &JsValue,
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
-    let object = require_object(realm, &arg(arguments, 0))?;
+    let object = to_object(realm, arg(arguments, 0))?;
     let keys = object
         .to_ref()
         .borrow()
@@ -530,7 +543,7 @@ fn get_own_property_symbols(
     _this: &JsValue,
     arguments: &[JsValue],
 ) -> JsResult<JsValue> {
-    let object = require_object(realm, &arg(arguments, 0))?;
+    let object = to_object(realm, arg(arguments, 0))?;
     let symbols = object
         .to_ref()
         .borrow()

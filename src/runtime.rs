@@ -358,7 +358,7 @@ impl Realm {
     /// `JS_CLASS_ARRAY_ITERATOR`: the elements are read from the array on
     /// every step.
     pub fn array_iterator(&self, array: ObjRef, entries: bool) -> ObjRef {
-        let mut data = ObjectData::ordinary(None);
+        let mut data = ObjectData::ordinary(Some(self.object_proto.clone()));
         data.kind = ObjectKind::ArrayIterator {
             array,
             index: 0,
@@ -375,7 +375,7 @@ impl Realm {
 
     /// Lazy string iterator over UTF-16 code units (ES2022 23.1.5.2.1).
     pub fn string_iterator(&self, text: Rc<str>) -> ObjRef {
-        let mut data = ObjectData::ordinary(None);
+        let mut data = ObjectData::ordinary(Some(self.object_proto.clone()));
         data.kind = ObjectKind::StringIterator { text, index: 0 };
         data.class_name = "String Iterator";
         let iterator = allocate(data);
