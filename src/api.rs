@@ -6,6 +6,7 @@
 
 use std::marker::PhantomData;
 
+use crate::module::Module;
 use crate::object::PropKey;
 use crate::runtime::{Context, Error, Result};
 use crate::value::{FromJs, IntoJs, JsValue};
@@ -13,7 +14,7 @@ use crate::value::{FromJs, IntoJs, JsValue};
 /// A borrowed context, equivalent to `rquickjs::Ctx<'js>`.
 #[derive(Clone, Copy)]
 pub struct Ctx<'js> {
-    context: &'js Context,
+    pub(crate) context: &'js Context,
     _marker: PhantomData<&'js ()>,
 }
 
@@ -36,9 +37,33 @@ impl<'js> Ctx<'js> {
     }
 
     pub fn globals(&self) -> Object<'js> {
-        Object {
-            raw: self.context.global(),
+        Object::from_raw(*self, self.context.global())
+    }
+
+    /// `JS_NewModuleDef` (quickjs.c:4415): parse and compile a module.
+    pub fn declare_module(&self, name: &str, source: &str) -> Result<Module<'js>> {
+        Module::declare(*self, name, source)
+    }
+
+    /// Declare and evaluate a module, returning its exports namespace.
+    pub fn eval_module(&self, name: &str, source: &str) -> Result<Object<'js>> {
+        self.declare_module(name, source)?.eval()
+    }
+
+    /// Parse a JSON document into a JavaScript value.
+    pub fn parse_json(&self, text: &str) -> Result<Value<'js>> {
+        Ok(Value {
+            raw: self.context.parse_json(text)?,
             ctx: *self,
+        })
+    }
+
+    /// Serialize a value through the realm's `JSON.stringify`, like
+    /// `rquickjs::Ctx`'s JSON helpers.
+    pub fn stringify_json(&self, value: &Value<'js>) -> Result<String> {
+        match self.context.to_json(&value.raw)? {
+            JsValue::String(text) => Ok(text.to_string()),
+            _ => Ok("undefined".to_string()),
         }
     }
 
@@ -197,8 +222,19 @@ pub struct Object<'js> {
 }
 
 impl<'js> Object<'js> {
+    pub(crate) fn from_raw(ctx: Ctx<'js>, raw: crate::object::Object) -> Self {
+        Self { raw, ctx }
+    }
+
     pub fn from_value(value: &Value<'js>) -> Option<Self> {
         value.as_object()
+    }
+
+    /// Read a property as a context-bound value, preserving the lifetime
+    /// relationship of the rquickjs API.
+    pub fn get_value(&self, key: &str) -> Result<Value<'js>> {
+        let raw: JsValue = self.get(key)?;
+        Ok(Value { raw, ctx: self.ctx })
     }
 
     pub fn get<V: FromJs>(&self, key: &str) -> Result<V> {
@@ -304,12 +340,25 @@ impl<'js> Function<'js> {
     }
 
     pub fn call<R: FromJs>(&self, arguments: &[Value<'js>]) -> Result<R> {
+        self.call_with_this(&Value {
+            raw: JsValue::Undefined,
+            ctx: self.object.ctx,
+        }, arguments)
+    }
+
+    /// Call with an explicit receiver, like `js_call` with a `this` value
+    /// (`JS_CallInternal`, quickjs.c:18051).
+    pub fn call_with_this<R: FromJs>(
+        &self,
+        this: &Value<'js>,
+        arguments: &[Value<'js>],
+    ) -> Result<R> {
         let arguments: Vec<JsValue> = arguments.iter().map(|value| value.raw.clone()).collect();
         let mut realm = self.object.ctx.context.realm.borrow_mut();
         let result = crate::vm::call_value(
             &mut realm,
             JsValue::Object(self.object.raw.to_ref()),
-            JsValue::Undefined,
+            this.raw.clone(),
             &arguments,
         )
         .map_err(|value| {

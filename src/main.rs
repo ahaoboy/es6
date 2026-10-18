@@ -29,6 +29,10 @@ struct Cli {
     /// Do not print the result of a top-level expression.
     #[arg(short = 'q', long = "quiet")]
     quiet: bool,
+
+    /// Evaluate the input as an ES module (`import`/`export`).
+    #[arg(short = 'm', long = "module")]
+    module: bool,
 }
 
 fn main() -> ExitCode {
@@ -62,8 +66,20 @@ fn run() -> miette::Result<()> {
 
     let runtime = Runtime::new().map_err(|error| miette::miette!("{error}"))?;
     let context = runtime.context();
-    let value = context
-        .eval(&source)
+    let value = if cli.module {
+        context
+            .eval_module(&name, &source)
+            .map(|_| JsValue::Undefined)
+            .map_err(|error| Report::new(JsDiagnostic::new(error, &name, source.clone())))?
+    } else {
+        context
+            .eval(&source)
+            .map_err(|error| Report::new(JsDiagnostic::new(error, &name, source.clone())))?
+    };
+
+    #[cfg(feature = "timers")]
+    context
+        .run_event_loop()
         .map_err(|error| Report::new(JsDiagnostic::new(error, &name, source.clone())))?;
 
     if !cli.quiet && !matches!(value, JsValue::Undefined) && source_is_expression(&source) {

@@ -889,8 +889,22 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             if parent.is_undefined() {
                 frame.stack.push(JsValue::Undefined);
             } else {
+                // A base-class parent initializes its fields before its body;
+                // a derived parent does so in its own `super()` call.
+                let parent_is_derived = parent
+                    .as_object()
+                    .and_then(|object| object.to_ref().borrow().function())
+                    .is_some_and(|function| function.has_super);
+                if !parent_is_derived {
+                    super::call::run_instance_initializer(
+                        realm,
+                        &parent,
+                        &frame.this,
+                    )?;
+                }
                 call_value(realm, parent.clone(), frame.this.clone(), &arguments)?;
-                super::call::run_instance_initializer(realm, &parent, &frame.this)?;
+                // Fields declared by this class initialize after `super()`.
+                super::call::run_instance_initializer(realm, &callee, &frame.this)?;
                 frame.stack.push(frame.this.clone());
             }
         }

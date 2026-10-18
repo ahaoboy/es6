@@ -108,24 +108,32 @@ impl Compiler {
             }
             ExprKind::Logical { op, left, right } => {
                 self.compile_expr(left)?;
-                let jump = match op {
-                    LogicalOp::And => {
-                        self.emit(Op::Dup);
-                        self.emit_jump(Op::JumpIfFalse(0))
-                    }
-                    LogicalOp::Or => {
-                        self.emit(Op::Dup);
-                        self.emit_jump(Op::JumpIfTrue(0))
-                    }
-                    LogicalOp::Nullish => {
-                        self.emit(Op::Dup);
-                        self.emit_jump(Op::JumpIfNullish(0))
-                    }
-                };
-                self.emit(Op::Pop);
-                self.compile_expr(right)?;
-                let end = self.position();
-                self.patch_jump(jump, end);
+                if *op == LogicalOp::Nullish {
+                    // Keep the left value when it is not nullish; otherwise
+                    // discard it and evaluate the right operand.
+                    self.emit(Op::Dup);
+                    let right_jump = self.emit_jump(Op::JumpIfNullishKeep(0));
+                    let end_jump = self.emit_jump(Op::Jump(0));
+                    let right_target = self.position();
+                    self.patch_jump(right_jump, right_target);
+                    // The original value and its duplicate are both discarded.
+                    self.emit(Op::Pop);
+                    self.emit(Op::Pop);
+                    self.compile_expr(right)?;
+                    let end = self.position();
+                    self.patch_jump(end_jump, end);
+                } else {
+                    self.emit(Op::Dup);
+                    let jump = match op {
+                        LogicalOp::And => self.emit_jump(Op::JumpIfFalse(0)),
+                        LogicalOp::Or => self.emit_jump(Op::JumpIfTrue(0)),
+                        LogicalOp::Nullish => unreachable!(),
+                    };
+                    self.emit(Op::Pop);
+                    self.compile_expr(right)?;
+                    let end = self.position();
+                    self.patch_jump(jump, end);
+                }
             }
             ExprKind::Assign { op, target, value } => {
                 self.compile_assignment(*op, target, value)?;
@@ -900,13 +908,12 @@ impl Compiler {
                     self.store_ident(name, BindingMode::Auto);
                     return Ok(());
                 }
-                if matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish) {
+                if matches!(op, AssignOp::And | AssignOp::Or) {
                     self.emit_ident_load(name);
                     self.emit(Op::Dup);
                     let jump = match op {
                         AssignOp::And => self.emit_jump(Op::JumpIfFalse(0)),
                         AssignOp::Or => self.emit_jump(Op::JumpIfTrue(0)),
-                        AssignOp::Nullish => self.emit_jump(Op::JumpIfNotUndefined(0)),
                         _ => unreachable!(),
                     };
                     self.emit(Op::Pop);
@@ -915,6 +922,24 @@ impl Compiler {
                     self.store_ident(name, BindingMode::Auto);
                     let end = self.position();
                     self.patch_jump(jump, end);
+                    return Ok(());
+                }
+                if op == AssignOp::Nullish {
+                    // Only assign when the current value is nullish; the
+                    // current value is the result otherwise.
+                    self.emit_ident_load(name);
+                    self.emit(Op::Dup);
+                    let assign_jump = self.emit_jump(Op::JumpIfNullishKeep(0));
+                    let end_jump = self.emit_jump(Op::Jump(0));
+                    let assign_target = self.position();
+                    self.patch_jump(assign_jump, assign_target);
+                    self.emit(Op::Pop);
+                    self.emit(Op::Pop);
+                    self.compile_expr(value)?;
+                    self.emit(Op::Dup);
+                    self.store_ident(name, BindingMode::Auto);
+                    let end = self.position();
+                    self.patch_jump(end_jump, end);
                     return Ok(());
                 }
                 if op == AssignOp::Add
@@ -940,6 +965,9 @@ impl Compiler {
             ExprKind::Member {
                 object, property, ..
             } => {
+                if matches!(op, AssignOp::And | AssignOp::Or | AssignOp::Nullish) {
+                    return self.compile_logical_member_assignment(op, object, property, value);
+                }
                 if op == AssignOp::Assign
                     && let MemberProperty::Computed(index) = property
                     && let ExprKind::Ident(object_name) = &object.kind
@@ -994,6 +1022,117 @@ impl Compiler {
                 self.bind_pattern(&pattern, BindingMode::Auto)?;
             }
             _ => return Err(self.error("Invalid assignment target")),
+        }
+        Ok(())
+    }
+
+    /// `object[key] &&= value`, `||=` and `??=`: the receiver and computed
+    /// key are evaluated once, the old value decides whether the store runs,
+    /// and the expression result is the old value (short-circuit) or the new
+    /// one (`AssignmentExpression`, ES2022 13.15.2).
+    fn compile_logical_member_assignment(
+        &mut self,
+        op: AssignOp,
+        object: &Expr,
+        property: &MemberProperty,
+        value: &Expr,
+    ) -> Result<(), ParseError> {
+        self.compile_expr(object)?;
+        let (object_depth, object_slot) = self.alloc_temp();
+        self.emit(Op::SetVar {
+            depth: object_depth,
+            slot: object_slot,
+        });
+        let key = if matches!(property, MemberProperty::Computed(_)) {
+            self.compile_member_key(property)?;
+            let (depth, slot) = self.alloc_temp();
+            self.emit(Op::SetVar { depth, slot });
+            Some((depth, slot))
+        } else {
+            None
+        };
+
+        self.emit(Op::GetVar {
+            depth: object_depth,
+            slot: object_slot,
+        });
+        match property {
+            MemberProperty::Ident(name) => self.emit_get_prop_const(name),
+            MemberProperty::Computed(_) => {
+                let (depth, slot) = key.expect("computed member has a key");
+                self.emit(Op::GetVar { depth, slot });
+                self.emit(Op::GetProp);
+            }
+        }
+
+        if op == AssignOp::Nullish {
+            self.emit(Op::Dup);
+            let assign_jump = self.emit_jump(Op::JumpIfNullishKeep(0));
+            let end_jump = self.emit_jump(Op::Jump(0));
+            let assign_target = self.position();
+            self.patch_jump(assign_jump, assign_target);
+            self.emit(Op::Pop);
+            self.emit(Op::Pop);
+            self.compile_member_store_value(
+                object_depth,
+                object_slot,
+                property,
+                key,
+                value,
+            )?;
+            let end = self.position();
+            self.patch_jump(end_jump, end);
+        } else {
+            self.emit(Op::Dup);
+            let keep_jump = match op {
+                AssignOp::And => self.emit_jump(Op::JumpIfFalse(0)),
+                AssignOp::Or => self.emit_jump(Op::JumpIfTrue(0)),
+                _ => unreachable!(),
+            };
+            self.emit(Op::Pop);
+            self.compile_member_store_value(
+                object_depth,
+                object_slot,
+                property,
+                key,
+                value,
+            )?;
+            let end = self.position();
+            self.patch_jump(keep_jump, end);
+        }
+        Ok(())
+    }
+
+    /// Store `value` into the receiver held in a temp slot, leaving the stored
+    /// value on the stack.
+    fn compile_member_store_value(
+        &mut self,
+        object_depth: u16,
+        object_slot: u16,
+        property: &MemberProperty,
+        key: Option<(u16, u16)>,
+        value: &Expr,
+    ) -> Result<(), ParseError> {
+        self.compile_expr(value)?;
+        let (value_depth, value_slot) = self.alloc_temp();
+        self.emit(Op::SetVar {
+            depth: value_depth,
+            slot: value_slot,
+        });
+        self.emit(Op::GetVar {
+            depth: object_depth,
+            slot: object_slot,
+        });
+        if let Some((depth, slot)) = key {
+            self.emit(Op::GetVar { depth, slot });
+        }
+        self.emit(Op::GetVar {
+            depth: value_depth,
+            slot: value_slot,
+        });
+        match property {
+            MemberProperty::Ident(name) => self.emit_set_prop_const(name, false),
+            MemberProperty::Computed(_) => self.emit(Op::SetProp),
         }
         Ok(())
     }

@@ -26,6 +26,8 @@ mod coerce;
 pub mod compiler;
 pub mod gc;
 pub mod lexer;
+mod module;
+mod modules;
 pub mod object;
 pub mod parser;
 mod promise;
@@ -34,6 +36,7 @@ pub mod value;
 pub mod vm;
 
 pub use api::{Array, Ctx, Function, Object, Value};
+pub use module::Module;
 pub use object::Property;
 pub use runtime::{Context, Error, Result, Runtime};
 pub use value::{FromJs, IntoJs, JsValue};

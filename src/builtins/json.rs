@@ -10,7 +10,11 @@ pub fn install(realm: &mut Realm) {
     define_builtin_object(realm, "JSON", &json);
 }
 
-fn parse_json(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
+pub(crate) fn parse_json(
+    realm: &mut Realm,
+    _this: &JsValue,
+    arguments: &[JsValue],
+) -> JsResult<JsValue> {
     let source = crate::vm::to_string(realm, arg(arguments, 0))?;
     let value: serde_json::Value = serde_json::from_str(&source)
         .map_err(|error| realm.syntax_error(format!("JSON.parse: {error}")))?;
@@ -39,7 +43,11 @@ fn from_json(realm: &mut Realm, value: &serde_json::Value) -> JsValue {
     }
 }
 
-fn stringify(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
+pub(crate) fn stringify(
+    realm: &mut Realm,
+    _this: &JsValue,
+    arguments: &[JsValue],
+) -> JsResult<JsValue> {
     let value = arg(arguments, 0);
     let mut output = String::new();
     if !to_json(realm, &value, &mut output)? {

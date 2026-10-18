@@ -214,6 +214,7 @@ impl JsValue {
             bound: None,
             lexical_this: None,
             instance_init: None,
+            has_super: false,
         };
         Self::from_function(Rc::new(function))
     }

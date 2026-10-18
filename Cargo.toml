@@ -4,8 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["cli"]
+default = ["cli", "modules"]
+modules = ["console", "fs", "os", "path", "timers"]
 cli = ["dep:clap", "dep:miette"]
+console = []
+fs = []
+os = ["dep:sysinfo"]
+path = []
+timers = []
 
 [dependencies]
 indexmap = "2"
@@ -16,6 +22,9 @@ rustc-hash = "2"
 serde_json = { version = "1", features = ["preserve_order"] }
 smallvec = "1"
 time = { version = "0.3", features = ["local-offset", "parsing", "formatting"] }
+sysinfo = { version = "0.39", optional = true, default-features = false, features = [
+  "system",
+] }
 clap = { version = "4", features = ["derive"], optional = true }
 miette = { version = "7", features = ["fancy"], optional = true }
 
@@ -23,8 +32,3 @@ miette = { version = "7", features = ["fancy"], optional = true }
 name = "es6"
 path = "src/main.rs"
 required-features = ["cli"]
-
-[profile.release]
-lto = true
-codegen-units = 1
-panic = "abort"

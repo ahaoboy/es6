@@ -160,6 +160,14 @@ pub struct Realm {
     /// storage on QuickJS' value stack.
     #[allow(clippy::vec_box)]
     pub(crate) frames: Vec<Box<crate::vm::Frame>>,
+    #[cfg(feature = "timers")]
+    pub(crate) timers: Vec<crate::modules::timers::TimerEntry>,
+    #[cfg(feature = "timers")]
+    pub(crate) next_timer_id: u64,
+    #[cfg(feature = "timers")]
+    pub(crate) cleared_timer_ids: std::collections::HashSet<u64>,
+    /// Lazily created host modules returned by `require()`.
+    pub(crate) module_cache: std::collections::HashMap<String, JsValue>,
 }
 
 impl Realm {
@@ -241,6 +249,13 @@ impl Realm {
             well_known_symbols: std::collections::HashMap::new(),
             jobs: VecDeque::new(),
             frames: Vec::new(),
+            #[cfg(feature = "timers")]
+            timers: Vec::new(),
+            #[cfg(feature = "timers")]
+            next_timer_id: 1,
+            #[cfg(feature = "timers")]
+            cleared_timer_ids: std::collections::HashSet::new(),
+            module_cache: std::collections::HashMap::new(),
         };
         builtins::install(&mut realm);
         realm
@@ -438,6 +453,7 @@ impl Realm {
             bound: None,
             lexical_this: None,
             instance_init: None,
+            has_super: false,
         });
         JsValue::Object(self.function_object(function))
     }
@@ -487,8 +503,9 @@ impl Realm {
         def: Rc<FunctionDef>,
         env: EnvRef,
         instance_init: Option<Rc<FunctionDef>>,
+        has_super: bool,
     ) -> JsValue {
-        self.make_js_function_inner(def, env, None, instance_init)
+        self.make_js_function_inner_with_super(def, env, None, instance_init, has_super)
     }
 
     fn make_js_function_inner(
@@ -497,6 +514,17 @@ impl Realm {
         env: EnvRef,
         this: Option<JsValue>,
         instance_init: Option<Rc<FunctionDef>>,
+    ) -> JsValue {
+        self.make_js_function_inner_with_super(def, env, this, instance_init, false)
+    }
+
+    fn make_js_function_inner_with_super(
+        &self,
+        def: Rc<FunctionDef>,
+        env: EnvRef,
+        this: Option<JsValue>,
+        instance_init: Option<Rc<FunctionDef>>,
+        has_super: bool,
     ) -> JsValue {
         let name = def.name.clone();
         let length = def.length;
@@ -514,6 +542,7 @@ impl Realm {
             bound: None,
             lexical_this,
             instance_init,
+            has_super,
         });
         let object = self.function_object(function);
         if constructable {
@@ -647,7 +676,7 @@ fn allocate(data: ObjectData) -> ObjRef {
     crate::gc::allocate_object(data)
 }
 
-fn line_column(source: &str, offset: usize) -> (usize, usize) {
+pub(crate) fn line_column(source: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(source.len());
     let mut line = 1;
     let mut column = 1;
@@ -762,6 +791,12 @@ impl Runtime {
         self.context.run_jobs()
     }
 
+    /// Drain promise jobs and execute timers until no timers remain.
+    #[cfg(feature = "timers")]
+    pub fn run_event_loop(&self) -> Result<()> {
+        self.context.run_event_loop()
+    }
+
     /// Run a full cycle collection, like `JS_RunGC` (quickjs.c:7483).
     pub fn run_gc(&self) {
         crate::gc::run_gc_now();
@@ -843,8 +878,52 @@ impl Context {
         self.eval(&source)
     }
 
+    /// `JS_NewModuleDef` (quickjs.c:4415): parse and compile a module without
+    /// running it.
+    pub fn declare_module(&self, name: &str, source: &str) -> Result<crate::module::Module<'_>> {
+        crate::module::Module::declare(crate::api::Ctx::new(self), name, source)
+    }
+
+    /// Declare and evaluate an ES module, returning its exports namespace.
+    pub fn eval_module(&self, name: &str, source: &str) -> Result<Object> {
+        let exports = self.declare_module(name, source)?.eval()?;
+        Ok(exports.into_raw())
+    }
+
+    /// Parse a JSON document with the realm's own parser.
+    pub fn parse_json(&self, text: &str) -> Result<JsValue> {
+        let mut realm = self.realm.borrow_mut();
+        crate::builtins::json::parse_json(
+            &mut realm,
+            &JsValue::Undefined,
+            &[JsValue::string(text)],
+        )
+        .map_err(|value| {
+            let message = crate::vm::display_error(&realm, value.clone());
+            Error::from_value(value, message)
+        })
+    }
+
+    /// Serialize a value with the realm's `JSON.stringify`.
+    pub fn to_json(&self, value: &JsValue) -> Result<JsValue> {
+        let mut realm = self.realm.borrow_mut();
+        crate::builtins::json::stringify(&mut realm, &JsValue::Undefined, &[value.clone()])
+            .map_err(|value| {
+                let message = crate::vm::display_error(&realm, value.clone());
+                Error::from_value(value, message)
+            })
+    }
+
     pub fn global(&self) -> Object {
         Object::from_ref(self.realm.borrow().global.clone())
+    }
+
+    /// Register a host module returned by `require()` / static `import`.
+    pub fn register_module(&self, name: &str, value: JsValue) {
+        self.realm
+            .borrow_mut()
+            .module_cache
+            .insert(name.to_string(), value);
     }
 
     pub fn object(&self) -> Object {
@@ -914,6 +993,30 @@ impl Context {
             let message = crate::vm::display_error(&realm, value.clone());
             Error::from_value(value, message)
         })
+    }
+
+    /// Run the microtask queue and timers until the timer queue is empty.
+    #[cfg(feature = "timers")]
+    pub fn run_event_loop(&self) -> Result<()> {
+        loop {
+            self.run_jobs()?;
+            let delay = {
+                let realm = self.realm.borrow();
+                crate::modules::timers::next_delay(&realm)
+            };
+            let Some(delay) = delay else {
+                break;
+            };
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+            }
+            let mut realm = self.realm.borrow_mut();
+            crate::modules::timers::run_due(&mut realm).map_err(|value| {
+                let message = crate::vm::display_error(&realm, value.clone());
+                Error::from_value(value, message)
+            })?;
+        }
+        Ok(())
     }
 }
 

@@ -173,6 +173,9 @@ pub struct JsFunction {
     pub bound: Option<BoundFunction>,
     pub lexical_this: Option<JsValue>,
     pub instance_init: Option<Rc<FunctionDef>>,
+    /// True for a derived class constructor: its field initializer runs after
+    /// `super()`, not before the constructor body.
+    pub has_super: bool,
 }
 
 #[derive(Clone)]
@@ -199,6 +202,7 @@ impl JsFunction {
             bound: None,
             lexical_this: None,
             instance_init: None,
+            has_super: false,
         }
     }
 

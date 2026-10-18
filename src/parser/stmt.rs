@@ -3,9 +3,252 @@
 use super::*;
 
 impl<'a> Parser<'a> {
+    /// Static `import` declaration. Dynamic `import()` is not part of the
+    /// host-module bridge and is rejected.
+    fn parse_import(&mut self, span: Span) -> Result<Stmt, ParseError> {
+        self.advance()?;
+        let mut specifiers = Vec::new();
+        if let TokenKind::String(_) = self.current.kind {
+            // Side-effect import: `import "fs";`
+        } else {
+            if self.eat_punct(Punct::Star)? {
+                self.expect_ident("as")?;
+                specifiers.push(ImportSpecifier::Namespace(self.binding_ident()?));
+            } else if self.current.is_punct(Punct::LBrace) {
+                self.advance()?;
+                loop {
+                    if self.current.is_punct(Punct::RBrace) {
+                        self.advance()?;
+                        break;
+                    }
+                    let imported = self.parse_import_name()?;
+                    let local = if self.eat_ident("as")? {
+                        self.binding_ident()?
+                    } else {
+                        imported.clone()
+                    };
+                    specifiers.push(ImportSpecifier::Named { imported, local });
+                    if !self.eat_punct(Punct::Comma)? {
+                        self.expect_punct(Punct::RBrace)?;
+                        break;
+                    }
+                }
+            } else {
+                specifiers.push(ImportSpecifier::Default(self.binding_ident()?));
+                if self.eat_punct(Punct::Comma)? {
+                    if self.eat_punct(Punct::Star)? {
+                        self.expect_ident("as")?;
+                        specifiers.push(ImportSpecifier::Namespace(self.binding_ident()?));
+                    } else if self.eat_punct(Punct::LBrace)? {
+                        loop {
+                            if self.current.is_punct(Punct::RBrace) {
+                                self.advance()?;
+                                break;
+                            }
+                            let imported = self.parse_import_name()?;
+                            let local = if self.eat_ident("as")? {
+                                self.binding_ident()?
+                            } else {
+                                imported.clone()
+                            };
+                            specifiers.push(ImportSpecifier::Named { imported, local });
+                            if !self.eat_punct(Punct::Comma)? {
+                                self.expect_punct(Punct::RBrace)?;
+                                break;
+                            }
+                        }
+                    } else {
+                        return Err(self.error("Expected `*` or `{` after default import"));
+                    }
+                }
+            }
+            self.expect_ident("from")?;
+        }
+        let source = match &self.current.kind {
+            TokenKind::String(source) => source.clone(),
+            _ => return Err(self.error("Expected module specifier string")),
+        };
+        self.advance()?;
+        self.consume_semicolon()?;
+        Ok(Stmt {
+            kind: StmtKind::Import(ImportDecl { source, specifiers }),
+            span,
+        })
+    }
+
+    fn parse_import_name(&mut self) -> Result<String, ParseError> {
+        let name = match &self.current.kind {
+            TokenKind::Ident(name) | TokenKind::String(name) => name.clone(),
+            _ => return Err(self.error("Expected import name")),
+        };
+        self.advance()?;
+        Ok(name)
+    }
+
+    /// ES module export declaration (`ModuleItem`, ES2022 16.2.3).
+    ///
+    /// The module compiler turns these into assignments on the exports
+    /// namespace; the parser only records what is exported.
+    fn parse_export(&mut self, span: Span) -> Result<Stmt, ParseError> {
+        self.advance()?;
+        let kind = if self.eat_ident("default")? {
+            let expression = if self.current.is_ident("function") {
+                Expr {
+                    kind: ExprKind::Function(self.parse_function_declaration(false)?),
+                    span: self.span(),
+                }
+            } else if self.current.is_ident("async") && self.peek().is_some_and(|t| t.is_ident("function"))
+            {
+                self.advance()?;
+                Expr {
+                    kind: ExprKind::Function(self.parse_function_declaration(true)?),
+                    span: self.span(),
+                }
+            } else if self.current.is_ident("class") {
+                Expr {
+                    kind: ExprKind::Class(self.parse_class(false)?),
+                    span: self.span(),
+                }
+            } else {
+                self.parse_assignment()?
+            };
+            self.consume_semicolon()?;
+            return Ok(Stmt {
+                kind: StmtKind::Export(ExportDecl {
+                    kind: ExportKind::Default(Box::new(expression)),
+                    source: None,
+                }),
+                span,
+            });
+        } else if self.current.is_punct(Punct::Star) {
+            self.advance()?;
+            let alias = if self.eat_ident("as")? {
+                Some(self.parse_import_name()?)
+            } else {
+                None
+            };
+            self.expect_ident("from")?;
+            let source = self.module_specifier()?;
+            self.consume_semicolon()?;
+            return Ok(Stmt {
+                kind: StmtKind::Export(ExportDecl {
+                    kind: ExportKind::All { alias },
+                    source: Some(source),
+                }),
+                span,
+            });
+        } else if self.current.is_punct(Punct::LBrace) {
+            self.advance()?;
+            let mut specifiers = Vec::new();
+            loop {
+                if self.current.is_punct(Punct::RBrace) {
+                    self.advance()?;
+                    break;
+                }
+                let local = self.parse_import_name()?;
+                let exported = if self.eat_ident("as")? {
+                    self.parse_import_name()?
+                } else {
+                    local.clone()
+                };
+                specifiers.push(ExportSpecifier { local, exported });
+                if !self.eat_punct(Punct::Comma)? {
+                    self.expect_punct(Punct::RBrace)?;
+                    break;
+                }
+            }
+            let source = if self.eat_ident("from")? {
+                Some(self.module_specifier()?)
+            } else {
+                None
+            };
+            self.consume_semicolon()?;
+            return Ok(Stmt {
+                kind: StmtKind::Export(ExportDecl {
+                    kind: ExportKind::Named(specifiers),
+                    source,
+                }),
+                span,
+            });
+        } else if self.current.is_ident("var")
+            || self.current.is_ident("let")
+            || self.current.is_ident("const")
+        {
+            let kind = if self.current.is_ident("var") {
+                VarKind::Var
+            } else if self.current.is_ident("let") {
+                VarKind::Let
+            } else {
+                VarKind::Const
+            };
+            self.advance()?;
+            let declaration = self.parse_var_declarations(kind)?;
+            self.consume_semicolon()?;
+            StmtKind::Export(ExportDecl {
+                kind: ExportKind::Declaration(Box::new(Stmt {
+                    kind: StmtKind::Var(declaration),
+                    span,
+                })),
+                source: None,
+            })
+        } else if self.current.is_ident("function") {
+            let function = self.parse_function_declaration(false)?;
+            StmtKind::Export(ExportDecl {
+                kind: ExportKind::Declaration(Box::new(Stmt {
+                    kind: StmtKind::Function(function),
+                    span,
+                })),
+                source: None,
+            })
+        } else if self.current.is_ident("async")
+            && let Some(next) = self.peek()
+            && next.is_ident("function")
+        {
+            self.advance()?;
+            let function = self.parse_function_declaration(true)?;
+            StmtKind::Export(ExportDecl {
+                kind: ExportKind::Declaration(Box::new(Stmt {
+                    kind: StmtKind::Function(function),
+                    span,
+                })),
+                source: None,
+            })
+        } else if self.current.is_ident("class") {
+            let class = self.parse_class(true)?;
+            StmtKind::Export(ExportDecl {
+                kind: ExportKind::Declaration(Box::new(Stmt {
+                    kind: StmtKind::Class(class),
+                    span,
+                })),
+                source: None,
+            })
+        } else {
+            return Err(self.error(format!(
+                "Unexpected token after `export`: {}",
+                self.current.description()
+            )));
+        };
+        Ok(Stmt { kind, span })
+    }
+
+    fn module_specifier(&mut self) -> Result<String, ParseError> {
+        let source = match &self.current.kind {
+            TokenKind::String(source) => source.clone(),
+            _ => return Err(self.error("Expected module specifier string")),
+        };
+        self.advance()?;
+        Ok(source)
+    }
+
     /// QuickJS `js_parse_statement` (quickjs.c:28756).
     pub(super) fn parse_statement(&mut self) -> Result<Stmt, ParseError> {
         let span = self.span();
+        if self.current.is_ident("import") {
+            return self.parse_import(span);
+        }
+        if self.current.is_ident("export") {
+            return self.parse_export(span);
+        }
         if self.current.is_punct(Punct::Semicolon) {
             self.advance()?;
             return Ok(Stmt {

@@ -59,6 +59,12 @@ pub(crate) enum Job {
         thenable: JsValue,
         then: JsValue,
     },
+    /// `queueMicrotask` / `Promise`-style native callback job.
+    #[cfg(feature = "timers")]
+    Callback {
+        function: JsValue,
+        arguments: Vec<JsValue>,
+    },
 }
 
 thread_local! {
@@ -367,6 +373,14 @@ pub(crate) fn run_job(realm: &mut Realm, job: Job) -> JsResult<()> {
             then,
         } => {
             run_thenable_job(realm, promise, thenable, then);
+            Ok(())
+        }
+        #[cfg(feature = "timers")]
+        Job::Callback {
+            function,
+            arguments,
+        } => {
+            crate::vm::call_value(realm, function, JsValue::Undefined, &arguments)?;
             Ok(())
         }
         Job::Resume {

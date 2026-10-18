@@ -5,6 +5,113 @@
 use super::*;
 
 impl Compiler {
+    /// Static imports are lowered to the host `require()` bridge:
+    ///
+    /// ```text
+    /// GetGlobal require; PushConst "fs"; Call 1
+    /// Dup; GetPropConst readFileSync; SetVar ...
+    /// Pop
+    /// ```
+    pub(super) fn compile_import(&mut self, import: &ImportDecl) -> Result<(), ParseError> {
+        self.compile_require(&import.source);
+
+        for specifier in &import.specifiers {
+            match specifier {
+                ImportSpecifier::Default(local) | ImportSpecifier::Namespace(local) => {
+                    self.emit(Op::Dup);
+                    self.store_ident(local, BindingMode::Auto);
+                }
+                ImportSpecifier::Named { imported, local } if imported == "default" => {
+                    self.emit(Op::Dup);
+                    self.store_ident(local, BindingMode::Auto);
+                }
+                ImportSpecifier::Named { imported, local } => {
+                    self.emit(Op::Dup);
+                    self.emit_get_prop_const(imported);
+                    self.store_ident(local, BindingMode::Auto);
+                }
+            }
+        }
+        self.emit(Op::Pop);
+        Ok(())
+    }
+
+    fn compile_require(&mut self, source: &str) {
+        let require = self.string_constant("require");
+        self.emit(Op::GetGlobal(require));
+        let source = self.string_constant(source);
+        self.emit(Op::PushConst(source));
+        self.emit(Op::Call(1));
+    }
+
+    fn emit_module_exports(&mut self) {
+        self.emit_ident_load(MODULE_EXPORTS_BINDING);
+    }
+
+    /// Pops `[exports, value]` and stores `value` under `name`.
+    fn store_export(&mut self, name: &str) {
+        self.emit_set_prop_const(name, false);
+        self.emit(Op::Pop);
+    }
+
+    /// Record the exports of a module statement (`ModuleItem` evaluation,
+    /// ES2022 16.2.1.6). The namespace is an ordinary object passed to the
+    /// compiled module body, like the exports object of QuickJS' module
+    /// bindings (`JSModuleDef`, quickjs.c:4381).
+    pub(super) fn compile_export(&mut self, export: &ExportDecl) -> Result<(), ParseError> {
+        match &export.kind {
+            ExportKind::Default(expression) => {
+                self.emit_module_exports();
+                self.compile_expr(expression)?;
+                self.store_export("default");
+            }
+            ExportKind::Declaration(statement) => {
+                self.compile_statement(statement)?;
+                for name in declaration_names(statement) {
+                    self.emit_module_exports();
+                    self.emit_ident_load(&name);
+                    self.store_export(&name);
+                }
+            }
+            ExportKind::Named(specifiers) => {
+                for specifier in specifiers {
+                    self.emit_module_exports();
+                    match &export.source {
+                        Some(source) => {
+                            self.compile_require(source);
+                            self.emit_get_prop_const(&specifier.local);
+                        }
+                        None => self.emit_ident_load(&specifier.local),
+                    }
+                    self.store_export(&specifier.exported);
+                }
+            }
+            ExportKind::All { alias } => {
+                let Some(source) = &export.source else {
+                    return Err(self.error("`export *` requires a module specifier"));
+                };
+                match alias {
+                    Some(alias) => {
+                        self.emit_module_exports();
+                        self.compile_require(source);
+                        self.store_export(alias);
+                    }
+                    None => {
+                        // Object.assign(exports, require(source))
+                        let object = self.string_constant("Object");
+                        self.emit(Op::GetGlobal(object));
+                        self.emit_get_prop_const("assign");
+                        self.emit_module_exports();
+                        self.compile_require(source);
+                        self.emit(Op::Call(2));
+                        self.emit(Op::Pop);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn compile_statement(&mut self, statement: &Stmt) -> Result<(), ParseError> {
         self.span = statement.span;
         match &statement.kind {
@@ -37,6 +144,8 @@ impl Compiler {
                     self.emit(Op::Pop);
                 }
             }
+            StmtKind::Import(import) => self.compile_import(import)?,
+            StmtKind::Export(export) => self.compile_export(export)?,
             StmtKind::If {
                 test,
                 consequent,

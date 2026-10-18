@@ -59,6 +59,14 @@ enum BindingMode {
     Global,
 }
 
+/// Name of the exports namespace parameter of a compiled module body.
+///
+/// It corresponds to the `exports` argument of a CommonJS-style module wrapper;
+/// QuickJS instead keeps `JSModuleDef` bindings in the module record
+/// (`JSModuleDef`, quickjs.c:4381), which is the same indirection without a
+/// named parameter.
+pub const MODULE_EXPORTS_BINDING: &str = "__module_exports__";
+
 pub fn compile_program(program: &Program) -> Result<Rc<FunctionDef>, ParseError> {
     let mut compiler = Compiler::new(true, Vec::new(), "<eval>".into());
     compiler.compile_script(&program.body)?;
@@ -67,6 +75,29 @@ pub fn compile_program(program: &Program) -> Result<Rc<FunctionDef>, ParseError>
     // Top-level bytecode registers with the GC like QuickJS'
     // `JS_GC_OBJ_TYPE_FUNCTION_BYTECODE` (quickjs.c:450).
     Ok(crate::gc::register_def(Rc::new(def)))
+}
+
+/// Compile an ES module body into a function taking the exports namespace.
+///
+/// ES modules are strict and their bindings are module-scoped, so the body is
+/// compiled as a function rather than as global script code. This is the
+/// equivalent of wrapping the source in `(function (exports) { ... })`, which
+/// keeps top-level `var`/`let`/`const` private to the module — the role
+/// `JSModuleDef` plays in QuickJS (quickjs.c:4381).
+pub fn compile_module(program: &Program) -> Result<Rc<FunctionDef>, ParseError> {
+    let mut compiler = Compiler::new(false, Vec::new(), "<module>".into());
+    compiler.strict = true;
+    let function = Function {
+        name: Some("<module>".into()),
+        params: vec![Pattern::Ident(MODULE_EXPORTS_BINDING.into())],
+        body: FunctionBody::Block(program.body.clone()),
+        is_arrow: false,
+        is_async: false,
+        is_generator: false,
+        span: Span::default(),
+    };
+    let def = compiler.compile_function(&function, false, false)?;
+    Ok(crate::gc::register_def(def))
 }
 
 pub fn compile_function_source(function: &Function) -> Result<Rc<FunctionDef>, ParseError> {
@@ -269,6 +300,12 @@ impl Compiler {
     }
 
     fn compile_script(&mut self, statements: &[Stmt]) -> Result<(), ParseError> {
+        // ES module imports are evaluated before the body of the module.
+        for statement in statements {
+            if let StmtKind::Import(import) = &statement.kind {
+                self.compile_import(import)?;
+            }
+        }
         // Global `var` bindings are hoisted and initialized to undefined before
         // any statement runs; function declarations overwrite them afterwards.
         for name in collect_var_names(statements) {
@@ -278,7 +315,7 @@ impl Compiler {
         }
         self.hoist_functions(statements, true)?;
         for (index, statement) in statements.iter().enumerate() {
-            if matches!(statement.kind, StmtKind::Function(_)) {
+            if matches!(statement.kind, StmtKind::Function(_) | StmtKind::Import(_)) {
                 continue;
             }
             if index + 1 == statements.len()
@@ -296,9 +333,16 @@ impl Compiler {
     }
 
     fn compile_function_body(&mut self, statements: &[Stmt]) -> Result<(), ParseError> {
+        // Only reachable for module bodies: imports are evaluated before any
+        // statement, exactly like `compile_script` hoists them.
+        for statement in statements {
+            if let StmtKind::Import(import) = &statement.kind {
+                self.compile_import(import)?;
+            }
+        }
         self.hoist_functions(statements, false)?;
         for statement in statements {
-            if matches!(statement.kind, StmtKind::Function(_)) {
+            if matches!(statement.kind, StmtKind::Function(_) | StmtKind::Import(_)) {
                 continue;
             }
             self.compile_statement(statement)?;
@@ -409,15 +453,28 @@ impl Compiler {
         _script_scope: bool,
     ) -> Result<(), ParseError> {
         for statement in statements {
-            if let StmtKind::Function(function) = &statement.kind {
-                let Some(name) = &function.name else {
-                    continue;
-                };
-                let def = self.compile_function(function, false, false)?;
-                let constant = self.add_constant(Constant::Function(def));
-                self.emit(Op::Closure(constant));
-                self.store_ident(name, BindingMode::Auto);
-            }
+            let function = match &statement.kind {
+                StmtKind::Function(function) => Some(function),
+                // `export function f() {}` hoists like a plain declaration.
+                StmtKind::Export(export) => match &export.kind {
+                    ExportKind::Declaration(inner) => match &inner.kind {
+                        StmtKind::Function(function) => Some(function),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(function) = function else {
+                continue;
+            };
+            let Some(name) = &function.name else {
+                continue;
+            };
+            let def = self.compile_function(function, false, false)?;
+            let constant = self.add_constant(Constant::Function(def));
+            self.emit(Op::Closure(constant));
+            self.store_ident(name, BindingMode::Auto);
         }
         Ok(())
     }

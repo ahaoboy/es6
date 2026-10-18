@@ -158,8 +158,12 @@ pub fn construct_value(
     }
     let this_object = ObjectData::ordinary(Some(prototype));
     let this = JsValue::Object(Rc::new(RefCell::new(this_object)));
+    // Base class fields initialize before the constructor body runs; derived
+    // class fields initialize in the `super()` call (see `Op::SuperCall`).
+    if !function.has_super {
+        run_instance_initializer(realm, &callee, &this)?;
+    }
     let result = call_value(realm, callee.clone(), this.clone(), arguments)?;
-    run_instance_initializer(realm, &callee, &this)?;
     Ok(if result.is_object() { result } else { this })
 }
 
@@ -255,8 +259,12 @@ pub(crate) fn create_class(
         .constructor
         .clone()
         .ok_or_else(|| realm.type_error("Missing class constructor"))?;
-    let constructor =
-        realm.make_class_constructor(constructor_def, env.clone(), class.instance_init.clone());
+    let constructor = realm.make_class_constructor(
+        constructor_def,
+        env.clone(),
+        class.instance_init.clone(),
+        class.has_super,
+    );
     let constructor_object = constructor
         .as_object()
         .ok_or_else(|| realm.type_error("Invalid constructor"))?;

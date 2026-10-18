@@ -78,10 +78,17 @@ fn display_error_value(value: &JsValue) -> String {
                     .get_own_value(&PropKey::from("message"))
                     .and_then(|value| value.as_string())
                     .unwrap_or_else(|| Rc::from(""));
-                if message.is_empty() {
+                let text = if message.is_empty() {
                     name.to_string()
                 } else {
                     format!("{name}: {message}")
+                };
+                match data
+                    .get_own_value(&PropKey::from("stack"))
+                    .and_then(|value| value.as_string())
+                {
+                    Some(stack) => format!("{text}\n{stack}"),
+                    None => text,
                 }
             } else {
                 "[object Object]".into()

@@ -55,6 +55,9 @@ fn error_constructor(
             Some(crate::vm::to_string(realm, arg(arguments, 0))?)
         };
         if let JsValue::Object(object) = this {
+            // `new Error()` builds an ordinary receiver; mark it so thrown
+            // values are recognized and displayed like native errors.
+            object.borrow_mut().kind = ObjectKind::Error;
             if let Some(message) = message {
                 object.borrow_mut().define(
                     "message",

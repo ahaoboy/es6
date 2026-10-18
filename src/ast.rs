@@ -26,6 +26,44 @@ pub struct Stmt {
 }
 
 #[derive(Clone)]
+pub struct ImportDecl {
+    pub source: String,
+    pub specifiers: Vec<ImportSpecifier>,
+}
+
+#[derive(Clone)]
+pub enum ImportSpecifier {
+    Default(String),
+    Namespace(String),
+    Named { imported: String, local: String },
+}
+
+#[derive(Clone)]
+pub struct ExportDecl {
+    pub kind: ExportKind,
+    /// Present for re-exports (`export { x } from "m"` / `export * from "m"`).
+    pub source: Option<String>,
+}
+
+#[derive(Clone)]
+pub enum ExportKind {
+    /// `export default <expression>`
+    Default(Box<Expr>),
+    /// `export var/let/const/function/class ...`
+    Declaration(Box<Stmt>),
+    /// `export { local as exported }`
+    Named(Vec<ExportSpecifier>),
+    /// `export * from "m"`, optionally `export * as ns from "m"`.
+    All { alias: Option<String> },
+}
+
+#[derive(Clone)]
+pub struct ExportSpecifier {
+    pub local: String,
+    pub exported: String,
+}
+
+#[derive(Clone)]
 pub enum StmtKind {
     Empty,
     Expr(Expr),
@@ -33,6 +71,8 @@ pub enum StmtKind {
     Var(VarDecl),
     Function(Rc<Function>),
     Class(Rc<ClassDecl>),
+    Import(ImportDecl),
+    Export(ExportDecl),
     If {
         test: Expr,
         consequent: Box<Stmt>,

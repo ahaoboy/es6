@@ -5,13 +5,14 @@
 mod array;
 mod boolean;
 mod buffer;
+#[cfg(feature = "console")]
 mod console;
 mod date;
 mod error;
 mod function;
 mod generator;
 mod global;
-mod json;
+pub(crate) mod json;
 mod map;
 mod math;
 mod message;
@@ -50,11 +51,13 @@ pub fn install(realm: &mut Realm) {
     symbol::install(realm);
     promise::install(realm);
     date::install(realm);
+    #[cfg(feature = "console")]
     console::install(realm);
     message::install(realm);
     global::install(realm);
     generator::install(realm);
     weakmap::install(realm);
+    crate::modules::install(realm);
 }
 
 pub(crate) fn arg(arguments: &[JsValue], index: usize) -> JsValue {
@@ -286,6 +289,7 @@ pub(crate) fn bound_function(
         }),
         lexical_this: None,
         instance_init: None,
+        has_super: false,
     });
     JsValue::Object(realm.function_object(function))
 }

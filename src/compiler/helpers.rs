@@ -36,6 +36,11 @@ pub(super) fn collect_var_names(statements: &[Stmt]) -> Vec<String> {
 pub(super) fn collect_var_names_inner(statements: &[Stmt], names: &mut Vec<String>) {
     for statement in statements {
         match &statement.kind {
+            StmtKind::Export(export) => {
+                if let ExportKind::Declaration(declaration) = &export.kind {
+                    collect_var_names_inner(std::slice::from_ref(declaration.as_ref()), names);
+                }
+            }
             StmtKind::Var(declaration) => {
                 for declarator in &declaration.declarations {
                     if declaration.kind == VarKind::Var {
@@ -107,10 +112,34 @@ pub(super) fn collect_var_names_inner(statements: &[Stmt], names: &mut Vec<Strin
     }
 }
 
+/// Bindings introduced by a declaration, used to populate the exports
+/// namespace of an `export <declaration>` statement.
+pub(super) fn declaration_names(statement: &Stmt) -> Vec<String> {
+    match &statement.kind {
+        StmtKind::Var(declaration) => {
+            let mut names = Vec::new();
+            for declarator in &declaration.declarations {
+                collect_pattern_names(&declarator.pattern, &mut names);
+            }
+            names
+        }
+        StmtKind::Function(function) => function.name.iter().cloned().collect(),
+        StmtKind::Class(class) => class.name.iter().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(super) fn collect_direct_bindings(statements: &[Stmt]) -> Vec<String> {
     let mut names = Vec::new();
     for statement in statements {
         match &statement.kind {
+            StmtKind::Export(export) => {
+                if let ExportKind::Declaration(declaration) = &export.kind {
+                    names.extend(collect_direct_bindings(std::slice::from_ref(
+                        declaration.as_ref(),
+                    )));
+                }
+            }
             StmtKind::Var(declaration) if declaration.kind != VarKind::Var => {
                 for declarator in &declaration.declarations {
                     collect_pattern_names(&declarator.pattern, &mut names);
@@ -124,6 +153,15 @@ pub(super) fn collect_direct_bindings(statements: &[Stmt]) -> Vec<String> {
             StmtKind::Class(class) => {
                 if let Some(name) = &class.name {
                     names.push(name.clone());
+                }
+            }
+            StmtKind::Import(import) => {
+                for specifier in &import.specifiers {
+                    names.push(match specifier {
+                        ImportSpecifier::Default(local)
+                        | ImportSpecifier::Namespace(local)
+                        | ImportSpecifier::Named { local, .. } => local.clone(),
+                    });
                 }
             }
             _ => {}
@@ -254,7 +292,16 @@ pub(super) fn function_uses_arguments(function: &Function) -> bool {
 
 pub(super) fn uses_arguments_stmt(statement: &Stmt) -> bool {
     match &statement.kind {
-        StmtKind::Empty | StmtKind::Break(_) | StmtKind::Continue(_) | StmtKind::Debugger => false,
+        StmtKind::Empty
+        | StmtKind::Break(_)
+        | StmtKind::Continue(_)
+        | StmtKind::Debugger
+        | StmtKind::Import(_) => false,
+        StmtKind::Export(export) => match &export.kind {
+            ExportKind::Default(expression) => uses_arguments_expr(expression),
+            ExportKind::Declaration(statement) => uses_arguments_stmt(statement),
+            ExportKind::Named(_) | ExportKind::All { .. } => false,
+        },
         StmtKind::Expr(expression) | StmtKind::Throw(expression) => uses_arguments_expr(expression),
         StmtKind::Block(statements) => statements.iter().any(uses_arguments_stmt),
         StmtKind::Var(declaration) => declaration.declarations.iter().any(|declarator| {
