@@ -35,7 +35,7 @@ fn weak_map(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResu
         kind: ObjectKind::WeakMap(Vec::new()),
         extensible: true,
         class_name: "WeakMap",
-        shape: 0,
+        shape: crate::object::empty_shape(),
         is_prototype: false,
     }));
     let iterable = arg(arguments, 0);
@@ -66,7 +66,7 @@ fn weak_set(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResu
         kind: ObjectKind::WeakSet(Vec::new()),
         extensible: true,
         class_name: "WeakSet",
-        shape: 0,
+        shape: crate::object::empty_shape(),
         is_prototype: false,
     }));
     let iterable = arg(arguments, 0);

@@ -153,8 +153,7 @@ fn property_is_enumerable(
     let data = object.to_ref();
     let data = data.borrow();
     let enumerable = data
-        .props
-        .get(&key)
+        .get_own(&key)
         .map(|property| property.enumerable)
         .unwrap_or_else(|| {
             if let crate::object::ObjectKind::Array(array) = &data.kind {
@@ -320,7 +319,7 @@ fn define_property(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) ->
     let key = crate::vm::to_property_key(realm, arg(arguments, 1))?;
     let descriptor = require_object(realm, &arg(arguments, 2))?;
     let descriptor_value = JsValue::Object(descriptor.to_ref());
-    let existing = object.to_ref().borrow().props.get(&key).cloned();
+    let existing = object.to_ref().borrow().get_own(&key).cloned();
     let property = descriptor_from_object(realm, &descriptor_value, existing)?;
     object.to_ref().borrow_mut().define(key, property);
     Ok(arg(arguments, 0))
@@ -338,7 +337,7 @@ fn define_properties(
         let descriptor =
             crate::vm::get_value_property(realm, &JsValue::Object(descriptors.to_ref()), &key)?;
         let descriptor = require_object(realm, &descriptor)?;
-        let existing = object.to_ref().borrow().props.get(&key).cloned();
+        let existing = object.to_ref().borrow().get_own(&key).cloned();
         let property =
             descriptor_from_object(realm, &JsValue::Object(descriptor.to_ref()), existing)?;
         object.to_ref().borrow_mut().define(key, property);
@@ -452,7 +451,7 @@ fn get_own_property_descriptor(
     let (writable, enumerable, configurable, get, set, accessor) = {
         let data = object.to_ref();
         let data = data.borrow();
-        match data.props.get(&key) {
+        match data.get_own(&key) {
             Some(property) => (
                 property.writable,
                 property.enumerable,
@@ -562,7 +561,7 @@ fn freeze(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult
     let reference = object.to_ref();
     let mut data = reference.borrow_mut();
     data.extensible = false;
-    for property in data.props.values_mut() {
+    for property in data.props.iter_mut() {
         property.writable = false;
         property.configurable = false;
     }
@@ -577,7 +576,7 @@ fn is_frozen(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsRes
     let frozen = !data.extensible
         && data
             .props
-            .values()
+            .iter()
             .all(|property| !property.writable && !property.configurable);
     let _ = realm;
     Ok(JsValue::Bool(frozen))
@@ -588,7 +587,7 @@ fn seal(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<J
     let reference = object.to_ref();
     let mut data = reference.borrow_mut();
     data.extensible = false;
-    for property in data.props.values_mut() {
+    for property in data.props.iter_mut() {
         property.configurable = false;
     }
     let _ = realm;
@@ -599,7 +598,7 @@ fn is_sealed(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsRes
     let object = require_object(realm, &arg(arguments, 0))?;
     let data = object.to_ref();
     let data = data.borrow();
-    let sealed = !data.extensible && data.props.values().all(|property| !property.configurable);
+    let sealed = !data.extensible && data.props.iter().all(|property| !property.configurable);
     let _ = realm;
     Ok(JsValue::Bool(sealed))
 }

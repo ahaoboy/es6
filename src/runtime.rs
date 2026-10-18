@@ -363,7 +363,7 @@ impl Realm {
             kind: ObjectKind::Iterator { items, index: 0 },
             extensible: true,
             class_name: "Iterator",
-            shape: 0,
+            shape: crate::object::empty_shape(),
             is_prototype: false,
         });
         let next = self.native_function("next", 0, iterator_next);

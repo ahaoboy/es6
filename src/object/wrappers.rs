@@ -52,20 +52,12 @@ impl Object {
             data.length = data.length.max(index + 1);
             return;
         }
-        object.shape = object.shape.wrapping_add(1);
-        if object.is_prototype {
-            PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
-        }
-        object.props.insert(key.canonical(), Property::data(value));
+        object.define(key, Property::data(value));
     }
 
     pub fn set_key(&self, key: PropKey, value: JsValue) {
         let mut object = self.inner.borrow_mut();
-        object.shape = object.shape.wrapping_add(1);
-        if object.is_prototype {
-            PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
-        }
-        object.props.insert(key.canonical(), Property::data(value));
+        object.define(key, Property::data(value));
     }
 
     pub fn define(&self, key: &str, property: Property) {

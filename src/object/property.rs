@@ -42,11 +42,13 @@ impl ObjectData {
         if let Some(result) = self.put_array_value(realm, &key, &value)? {
             return Ok(result);
         }
-        if let Some(property) = self.props.get(&key.canonical()) {
+        if let Some(slot) = self.lookup(&key) {
+            let property = &self.props[slot as usize];
             if property.is_accessor() {
-                return match property.set.as_deref() {
+                let setter = property.set.as_deref().cloned();
+                return match setter {
                     Some(setter) => {
-                        crate::vm::call_value(realm, setter.clone(), receiver.clone(), &[value])?;
+                        crate::vm::call_value(realm, setter, receiver.clone(), &[value])?;
                         Ok(())
                     }
                     None => Ok(()),
@@ -55,16 +57,14 @@ impl ObjectData {
             if !property.writable {
                 return Ok(());
             }
-            if let Some(property) = self.props.get_mut(&key.canonical()) {
-                property.value = value;
-            }
+            self.props[slot as usize].value = value;
             return Ok(());
         }
         if let Some(proto) = &self.prototype {
             let mut current = Some(proto.clone());
             while let Some(proto) = current {
                 let cursor = proto.borrow();
-                if let Some(property) = cursor.props.get(&key.canonical()) {
+                if let Some(property) = cursor.property(&key) {
                     if property.is_accessor() {
                         return match property.set.as_deref() {
                             Some(setter) => {
@@ -88,11 +88,7 @@ impl ObjectData {
             }
         }
         if self.extensible {
-            self.shape = self.shape.wrapping_add(1);
-            if self.is_prototype {
-                PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
-            }
-            self.props.insert(key.canonical(), Property::data(value));
+            self.define(key, Property::data(value));
         }
         Ok(())
     }
@@ -200,14 +196,7 @@ impl ObjectData {
             data.items[index] = None;
             return true;
         }
-        let removed = self.props.shift_remove(&key.canonical()).is_some();
-        if removed {
-            self.shape = self.shape.wrapping_add(1);
-            if self.is_prototype {
-                PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        removed
+        self.remove(key)
     }
 
     /// Own keys in spec order: integer indices ascending, then string keys
@@ -257,7 +246,7 @@ impl ObjectData {
             }
             _ => {}
         }
-        for (key, property) in self.props.iter() {
+        for (key, property) in self.iter() {
             if enumerable_only && !property.enumerable {
                 continue;
             }
@@ -284,7 +273,7 @@ impl ObjectData {
     }
 
     pub fn set_proto(&mut self, proto: Option<ObjRef>) {
-        self.shape = self.shape.wrapping_add(1);
+        self.touch();
         if let Some(proto) = &proto {
             proto.borrow_mut().is_prototype = true;
         }

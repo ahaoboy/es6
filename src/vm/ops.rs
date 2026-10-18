@@ -349,23 +349,9 @@ pub(crate) fn execute_op(
             let object = pop(&mut frame.stack)?;
             if let JsValue::Object(object) = object {
                 let mut data = object.borrow_mut();
-                data.shape = data.shape.wrapping_add(1);
-                if data.is_prototype {
-                    crate::object::bump_prototype_generation();
-                }
-                let property = data.props.entry(key).or_insert_with(|| Property {
-                    value: JsValue::Undefined,
-                    get: None,
-                    set: None,
-                    writable: false,
-                    enumerable: true,
-                    configurable: true,
-                });
-                if is_getter {
-                    property.get = Some(Box::new(function));
-                } else {
-                    property.set = Some(Box::new(function));
-                }
+                let get = is_getter.then(|| function.clone());
+                let set = (!is_getter).then(|| function.clone());
+                data.define_accessor(key, get, set, true);
             } else {
                 return Err(realm.type_error("Cannot define accessor on primitive"));
             }
@@ -379,35 +365,29 @@ pub(crate) fn execute_op(
             let start = frame.stack.len() - count;
             let object = realm.object();
             {
-                // The per-site template map is built once and cloned: the
-                // clone copies the prepared hash table, so no key is hashed
-                // or parsed per evaluation.
+                // The per-site template is built once and cloned: shape and
+                // property vector are shared/copied, so no key is hashed or
+                // parsed per evaluation.
                 let template = {
                     let mut entry = frame.definition.prop_caches[cache as usize].borrow_mut();
                     if entry.literal.is_none() {
                         let keys = constant_strings(&frame.definition, keys);
-                        let mut map = crate::object::PropertyMap::with_capacity_and_hasher(
-                            count,
-                            rustc_hash::FxBuildHasher,
-                        );
-                        for key in keys.iter() {
-                            map.insert(
-                                crate::object::key_from_string(key.clone()),
-                                Property::data(JsValue::Undefined),
-                            );
-                        }
-                        entry.literal = Some(map);
+                        let keys: Vec<crate::object::PropKey> = keys
+                            .iter()
+                            .map(|key| crate::object::key_from_string(key.clone()))
+                            .collect();
+                        entry.literal = Some(crate::object::LiteralTemplate::new(&keys));
                     }
                     entry.literal.as_ref().expect("literal template").clone()
                 };
                 let mut data = object.borrow_mut();
-                data.props = template;
+                data.shape = template.shape;
+                data.props = template.props;
                 for (index, value) in frame.stack[start..].iter().enumerate() {
-                    if let Some((_, property)) = data.props.get_index_mut(index) {
+                    if let Some(property) = data.props.get_mut(index) {
                         property.value = value.clone();
                     }
                 }
-                data.shape = 1;
             }
             frame.stack.truncate(start);
             frame.stack.push(JsValue::Object(object));
@@ -1212,7 +1192,7 @@ pub(crate) fn execute_op(
             let (JsValue::Object(source), JsValue::Object(target)) = (source, target) else {
                 return Ok(Step::Continue);
             };
-            let names: Vec<PropKey> = source.borrow().props.keys().cloned().collect();
+            let names: Vec<PropKey> = source.borrow().shape.keys.clone();
             let receiver = JsValue::Object(target.clone());
             for key in names {
                 // `export *` never re-exports `default`.

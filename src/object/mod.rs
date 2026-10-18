@@ -3,10 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use indexmap::IndexMap;
-use rustc_hash::FxBuildHasher;
-
-pub type PropertyMap = IndexMap<PropKey, Property, FxBuildHasher>;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::bytecode::FunctionDef;
 use crate::runtime::Realm;
@@ -21,6 +18,117 @@ pub type NativeFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsVa
 /// `mark_children` (quickjs.c:7255).
 pub type DataFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue>>;
 pub type NativeData = Rc<RefCell<Vec<JsValue>>>;
+
+/// Shared object shape, the counterpart of QuickJS `JSShape` (quickjs.c:1102):
+/// an immutable key vector plus a key-to-slot index. Objects with the same
+/// property layout share one `Rc`, so creating a literal copies a pointer
+/// instead of rebuilding a hash table, and inline caches validate with the
+/// shape id before reading `props[slot]` directly.
+#[derive(Clone)]
+pub struct Shape {
+    /// Monotonic identity. Never reused, so a cache entry can compare ids.
+    pub id: u64,
+    /// Slot order, which is also the property enumeration order.
+    pub keys: Vec<PropKey>,
+    pub index: FxHashMap<PropKey, u32>,
+}
+
+static SHAPE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_shape_id() -> u64 {
+    SHAPE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    static EMPTY_SHAPE: Rc<Shape> = Rc::new(Shape {
+        id: 0,
+        keys: Vec::new(),
+        index: FxHashMap::default(),
+    });
+    /// Shape transition interning, the equivalent of QuickJS' shape
+    /// transition table. Objects built by the same code path converge on one
+    /// shared shape, which keeps inline caches monomorphic.
+    static TRANSITIONS: RefCell<FxHashMap<(u64, PropKey), Rc<Shape>>> =
+        RefCell::new(FxHashMap::default());
+}
+
+const TRANSITION_LIMIT: usize = 1 << 16;
+
+pub fn empty_shape() -> Rc<Shape> {
+    EMPTY_SHAPE.with(Rc::clone)
+}
+
+fn add_transition(parent: &Rc<Shape>, key: PropKey) -> Rc<Shape> {
+    TRANSITIONS.with(|map| {
+        let mut map = map.borrow_mut();
+        if let Some(child) = map.get(&(parent.id, key.clone())) {
+            return child.clone();
+        }
+        if map.len() >= TRANSITION_LIMIT {
+            map.clear();
+        }
+        let mut shape = Shape {
+            id: next_shape_id(),
+            keys: Vec::with_capacity(parent.keys.len() + 1),
+            index: parent.index.clone(),
+        };
+        shape.keys.extend(parent.keys.iter().cloned());
+        shape.grow(key.clone());
+        let child = Rc::new(shape);
+        map.insert((parent.id, key), child.clone());
+        child
+    })
+}
+
+impl Shape {
+    #[inline(always)]
+    pub fn slot(&self, key: &PropKey) -> Option<u32> {
+        self.index.get(key).copied()
+    }
+
+    fn grow(&mut self, key: PropKey) -> u32 {
+        let slot = self.keys.len() as u32;
+        self.keys.push(key.clone());
+        self.index.insert(key, slot);
+        slot
+    }
+
+    fn shrink(&mut self, slot: u32) {
+        self.keys.remove(slot as usize);
+        self.index.clear();
+        for (index, key) in self.keys.iter().enumerate() {
+            self.index.insert(key.clone(), index as u32);
+        }
+    }
+}
+
+/// Prepared object-literal layout, shared by every evaluation of the site.
+#[derive(Clone)]
+pub struct LiteralTemplate {
+    pub shape: Rc<Shape>,
+    pub props: Vec<Property>,
+}
+
+impl LiteralTemplate {
+    pub fn new(keys: &[PropKey]) -> Self {
+        let mut shape = Shape {
+            id: 0,
+            keys: Vec::with_capacity(keys.len()),
+            index: FxHashMap::default(),
+        };
+        for key in keys {
+            shape.grow(key.clone());
+        }
+        shape.id = next_shape_id();
+        Self {
+            shape: Rc::new(shape),
+            props: keys
+                .iter()
+                .map(|_| Property::data(JsValue::Undefined))
+                .collect(),
+        }
+    }
+}
 
 /// Monomorphic property cache for one constant access site. It mirrors
 /// QuickJS' `JSPropCacheEntry`: the receiver shape guards the prototype chain,
@@ -43,8 +151,8 @@ pub struct PropCache {
     /// constant: repeated accesses clone the atom instead of re-parsing and
     /// re-canonicalizing the text (QuickJS interns atoms once the same way).
     pub key: Option<PropKey>,
-    /// Prepared property map for an object-literal site.
-    pub literal: Option<PropertyMap>,
+    /// Prepared property layout for an object-literal site.
+    pub literal: Option<LiteralTemplate>,
 }
 
 static PROTOTYPE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -189,17 +297,15 @@ impl Property {
 }
 
 /// Object representation corresponding to QuickJS `JSObject` (quickjs.c:1125
-/// area): shape/properties, prototype and an optional exotic payload. The
-/// insertion-ordered map is the safe Rust stand-in for `JSShape`.
+/// area): a shared shape, a slot-aligned property vector, prototype and an
+/// optional exotic payload.
 pub struct ObjectData {
-    pub props: PropertyMap,
+    pub shape: Rc<Shape>,
+    pub props: Vec<Property>,
     pub prototype: Option<ObjRef>,
     pub kind: ObjectKind,
     pub extensible: bool,
     pub class_name: &'static str,
-    /// Monotonic property-shape version. Structural changes (insert/delete,
-    /// prototype change) invalidate inline caches, mirroring QuickJS shapes.
-    pub shape: u64,
     /// Set when this object appears in another object's prototype chain.
     /// Structural changes on prototypes invalidate monomorphic property
     /// caches that may have observed them.
@@ -207,14 +313,29 @@ pub struct ObjectData {
 }
 
 impl ObjectData {
+    #[inline(always)]
+    pub fn shape_id(&self) -> u64 {
+        self.shape.id
+    }
+
+    /// Drops cache validity after a structural change.
+    pub(crate) fn touch(&mut self) {
+        let mut shape = (*self.shape).clone();
+        shape.id = next_shape_id();
+        self.shape = Rc::new(shape);
+        if self.is_prototype {
+            PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn ordinary(prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::with_capacity_and_hasher(4, FxBuildHasher),
+            shape: empty_shape(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::Ordinary,
             extensible: true,
             class_name: "Object",
-            shape: 0,
             is_prototype: false,
         }
     }
@@ -222,7 +343,7 @@ impl ObjectData {
     pub fn array(prototype: Option<ObjRef>, items: Vec<JsValue>) -> Self {
         let length = items.len();
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::Array(ArrayData {
                 items: items.into_iter().map(Some).collect(),
@@ -230,7 +351,7 @@ impl ObjectData {
             }),
             extensible: true,
             class_name: "Array",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
@@ -243,55 +364,55 @@ impl ObjectData {
         Self {
             // `length` and `name` are defined right after construction; size
             // the map once instead of growing it per insert.
-            props: PropertyMap::with_capacity_and_hasher(2, FxBuildHasher),
+            props: Vec::new(),
             prototype: None,
             kind: ObjectKind::Function(function),
             extensible: true,
             class_name: "Function",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn boxed_string(value: JsString, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::BoxedString(value),
             extensible: true,
             class_name: "String",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn boxed_number(value: f64, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::BoxedNumber(value),
             extensible: true,
             class_name: "Number",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn boxed_bool(value: bool, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::BoxedBool(value),
             extensible: true,
             class_name: "Boolean",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn map(prototype: Option<ObjRef>, entries: Vec<(JsValue, JsValue)>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::Map(
                 entries
@@ -301,14 +422,14 @@ impl ObjectData {
             ),
             extensible: true,
             class_name: "Map",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn promise(prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::Promise(Box::new(PromiseData {
                 state: PromiseState::Pending,
@@ -318,43 +439,43 @@ impl ObjectData {
             })),
             extensible: true,
             class_name: "Promise",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn set(prototype: Option<ObjRef>, values: Vec<JsValue>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::Set(values.into_iter().map(MapKey).collect()),
             extensible: true,
             class_name: "Set",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn error(prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::Error,
             extensible: true,
             class_name: "Error",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn array_buffer(bytes: ByteBuffer, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::ArrayBuffer(ArrayBufferData { bytes }),
             extensible: true,
             class_name: "ArrayBuffer",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
@@ -367,7 +488,7 @@ impl ObjectData {
         prototype: Option<ObjRef>,
     ) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::DataView(DataViewData {
                 buffer,
@@ -377,7 +498,7 @@ impl ObjectData {
             }),
             extensible: true,
             class_name: "DataView",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
@@ -385,36 +506,36 @@ impl ObjectData {
     pub fn typed_array(data: TypedArrayData, prototype: Option<ObjRef>) -> Self {
         let class_name = data.kind.name();
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::TypedArray(data),
             extensible: true,
             class_name,
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn date(value: f64, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::Date(value),
             extensible: true,
             class_name: "Date",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
 
     pub fn regexp(data: Rc<RegExpData>, prototype: Option<ObjRef>) -> Self {
         Self {
-            props: PropertyMap::default(),
+            props: Vec::new(),
             prototype,
             kind: ObjectKind::RegExp(data),
             extensible: true,
             class_name: "RegExp",
-            shape: 0,
+            shape: empty_shape(),
             is_prototype: false,
         }
     }
@@ -460,11 +581,81 @@ impl ObjectData {
     }
 
     pub fn define(&mut self, key: impl Into<PropKey>, property: Property) {
-        self.shape = self.shape.wrapping_add(1);
+        let key = key.into().canonical();
+        if let Some(slot) = self.lookup(&key) {
+            self.props[slot as usize] = property;
+            return;
+        }
         if self.is_prototype {
             PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
         }
-        self.props.insert(key.into().canonical(), property);
+        self.shape = add_transition(&self.shape, key);
+        self.props.push(property);
+    }
+
+    /// Defines or updates an accessor in place, without touching the shape
+    /// when the key already exists.
+    pub fn define_accessor(
+        &mut self,
+        key: PropKey,
+        get: Option<JsValue>,
+        set: Option<JsValue>,
+        enumerable: bool,
+    ) {
+        let key = key.canonical();
+        if let Some(slot) = self.shape.slot(&key) {
+            let property = &mut self.props[slot as usize];
+            if get.is_some() {
+                property.get = get.map(Box::new);
+            }
+            if set.is_some() {
+                property.set = set.map(Box::new);
+            }
+            if self.is_prototype {
+                PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+        let mut property = Property::accessor(get, set);
+        property.enumerable = enumerable;
+        self.define(key, property);
+    }
+
+    /// Removes a slot-aligned own property.
+    pub fn remove(&mut self, key: &PropKey) -> bool {
+        let Some(slot) = self.lookup(key) else {
+            return false;
+        };
+        let mut shape = (*self.shape).clone();
+        shape.id = next_shape_id();
+        shape.shrink(slot);
+        self.shape = Rc::new(shape);
+        self.props.remove(slot as usize);
+        if self.is_prototype {
+            PROTOTYPE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        }
+        true
+    }
+
+    /// Slot lookup with the numeric-string canonical fallback.
+    #[inline(always)]
+    pub(crate) fn lookup(&self, key: &PropKey) -> Option<u32> {
+        if let Some(slot) = self.shape.slot(key) {
+            return Some(slot);
+        }
+        if matches!(key, PropKey::Str(_)) {
+            self.shape.slot(&key.canonical())
+        } else {
+            None
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&PropKey, &Property)> {
+        self.shape.keys.iter().zip(self.props.iter())
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&PropKey, &mut Property)> {
+        self.shape.keys.iter().zip(self.props.iter_mut())
     }
 
     pub fn define_value(&mut self, key: impl Into<PropKey>, value: JsValue) {
@@ -531,15 +722,9 @@ impl ObjectData {
 
     /// Fast property lookup for already-canonical VM keys. Only numeric
     /// string keys need a canonical fallback, mirroring QuickJS' atom keys.
-    fn property(&self, key: &PropKey) -> Option<&Property> {
-        self.props.get(key).or_else(|| {
-            if matches!(key, PropKey::Str(_)) {
-                let canonical = key.canonical();
-                self.props.get(&canonical)
-            } else {
-                None
-            }
-        })
+    #[inline]
+    pub(crate) fn property(&self, key: &PropKey) -> Option<&Property> {
+        self.lookup(key).map(|slot| &self.props[slot as usize])
     }
 
     pub fn has_property(&self, key: &PropKey) -> bool {

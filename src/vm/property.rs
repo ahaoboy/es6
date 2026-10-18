@@ -107,11 +107,9 @@ pub(crate) fn cached_get_const(
         let data = object_ref.borrow();
         let entry = cache.borrow();
         if entry.valid
-            && entry.object_shape == data.shape
+            && entry.object_shape == data.shape_id()
             && entry.own
-            && let Some(key) = &entry.key
-            && let Some((cached_key, property)) = data.props.get_index(entry.index as usize)
-            && cached_key == key
+            && let Some(property) = data.props.get(entry.index as usize)
         {
             let getter = property.get.as_deref().cloned();
             let value = property.value.clone();
@@ -143,29 +141,22 @@ pub(crate) fn cached_set_const(
         let entry = cache.borrow();
         if entry.valid
             && entry.own
-            && entry.object_shape == data.shape
-            && let Some(key) = &entry.key
-            && data
-                .props
-                .get_index(entry.index as usize)
-                .is_some_and(|(cached_key, _)| cached_key == key)
+            && entry.object_shape == data.shape_id()
+            && let Some(property) = data.props.get_mut(entry.index as usize)
         {
-            let index = entry.index as usize;
-            if let Some((_, property)) = data.props.get_index_mut(index) {
-                if property.is_accessor() {
-                    let setter = property.set.as_deref().cloned();
-                    drop(entry);
-                    drop(data);
-                    if let Some(setter) = setter {
-                        call_value(realm, setter, object.clone(), std::slice::from_ref(value))?;
-                    }
-                    return Ok(());
-                }
-                if property.writable {
-                    property.value = value.clone();
+            if property.is_accessor() {
+                let setter = property.set.as_deref().cloned();
+                drop(entry);
+                drop(data);
+                if let Some(setter) = setter {
+                    call_value(realm, setter, object.clone(), std::slice::from_ref(value))?;
                 }
                 return Ok(());
             }
+            if property.writable {
+                property.value = value.clone();
+            }
+            return Ok(());
         }
     }
     let key = property_key_from_constant(definition, index)?;
@@ -184,12 +175,15 @@ pub(crate) fn cached_get_property(
     if let JsValue::Object(object_ref) = object {
         let data = object_ref.borrow();
         let entry = cache.borrow();
-        if entry.valid && entry.object_shape == data.shape {
+        if entry.valid && entry.object_shape == data.shape_id() {
             let cached = if entry.own {
-                data.props
-                    .get_index(entry.index as usize)
-                    .filter(|(cached_key, _)| *cached_key == key)
-                    .map(|(_, property)| (property.value.clone(), property.get.as_deref().cloned()))
+                if data.shape.keys.get(entry.index as usize) == Some(key) {
+                    data.props
+                        .get(entry.index as usize)
+                        .map(|property| (property.value.clone(), property.get.as_deref().cloned()))
+                } else {
+                    None
+                }
             } else if entry.prototype_generation == crate::object::prototype_generation()
                 && entry
                     .receiver_proto
@@ -200,7 +194,7 @@ pub(crate) fn cached_get_property(
                             .as_ref()
                             .is_some_and(|value| Rc::ptr_eq(value, &proto))
                     })
-                && !data.props.contains_key(key)
+                && data.lookup(key).is_none()
             {
                 entry
                     .holder
@@ -208,14 +202,12 @@ pub(crate) fn cached_get_property(
                     .and_then(std::rc::Weak::upgrade)
                     .and_then(|holder| {
                         let holder_data = holder.borrow();
-                        if holder_data.shape == entry.holder_shape {
-                            holder_data
-                                .props
-                                .get_index(entry.index as usize)
-                                .filter(|(cached_key, _)| *cached_key == key)
-                                .map(|(_, property)| {
-                                    (property.value.clone(), property.get.as_deref().cloned())
-                                })
+                        if holder_data.shape_id() == entry.holder_shape
+                            && holder_data.shape.keys.get(entry.index as usize) == Some(key)
+                        {
+                            holder_data.props.get(entry.index as usize).map(|property| {
+                                (property.value.clone(), property.get.as_deref().cloned())
+                            })
                         } else {
                             None
                         }
@@ -238,12 +230,12 @@ pub(crate) fn cached_get_property(
     let value = get_value_property(realm, object, key)?;
     if let JsValue::Object(object_ref) = object {
         let receiver = object_ref.borrow();
-        if let Some(index) = receiver.props.get_index_of(key) {
+        if let Some(index) = receiver.lookup(key) {
             let mut entry = cache.borrow_mut();
-            entry.object_shape = receiver.shape;
+            entry.object_shape = receiver.shape_id();
             entry.holder = None;
             entry.receiver_proto = None;
-            entry.index = index as u32;
+            entry.index = index;
             entry.own = true;
             entry.valid = true;
         } else {
@@ -251,21 +243,17 @@ pub(crate) fn cached_get_property(
             while let Some(holder) = current {
                 let (shape, index, next) = {
                     let data = holder.borrow();
-                    (
-                        data.shape,
-                        data.props.get_index_of(key),
-                        data.prototype.clone(),
-                    )
+                    (data.shape_id(), data.lookup(key), data.prototype.clone())
                 };
                 holder.borrow_mut().is_prototype = true;
                 if let Some(index) = index {
                     let mut entry = cache.borrow_mut();
-                    entry.object_shape = receiver.shape;
+                    entry.object_shape = receiver.shape_id();
                     entry.holder = Some(Rc::downgrade(&holder));
                     entry.holder_shape = shape;
                     entry.receiver_proto = receiver.prototype.as_ref().map(Rc::downgrade);
                     entry.prototype_generation = crate::object::prototype_generation();
-                    entry.index = index as u32;
+                    entry.index = index;
                     entry.own = false;
                     entry.valid = true;
                     break;
@@ -289,13 +277,10 @@ pub(crate) fn cached_set_property(
         let mut data = object_ref.borrow_mut();
         let entry = cache.borrow();
         if entry.valid {
-            if entry.own && entry.object_shape == data.shape {
+            if entry.own && entry.object_shape == data.shape_id() {
                 let index = entry.index as usize;
-                if data
-                    .props
-                    .get_index(index)
-                    .is_some_and(|(cached_key, _)| cached_key == key)
-                    && let Some((_, property)) = data.props.get_index_mut(index)
+                if data.shape.keys.get(index) == Some(key)
+                    && let Some(property) = data.props.get_mut(index)
                 {
                     if property.is_accessor() {
                         let setter = property.set.as_deref().cloned();
@@ -313,15 +298,15 @@ pub(crate) fn cached_set_property(
                 }
             } else if entry.can_insert
                 && data.extensible
-                && entry.insert_shape == data.shape
+                && entry.insert_shape == data.shape_id()
                 && !data.has_property(key)
             {
                 data.define(key.clone(), Property::data(value.clone()));
                 drop(entry);
-                if let Some(index) = data.props.get_index_of(key) {
+                if let Some(index) = data.lookup(key) {
                     let mut entry = cache.borrow_mut();
-                    entry.object_shape = data.shape;
-                    entry.index = index as u32;
+                    entry.object_shape = data.shape_id();
+                    entry.index = index;
                     entry.own = true;
                     entry.valid = true;
                 }
@@ -334,19 +319,19 @@ pub(crate) fn cached_set_property(
     let (shape_before, had_own) = match object {
         JsValue::Object(object_ref) => {
             let data = object_ref.borrow();
-            (data.shape, data.props.contains_key(key))
+            (data.shape_id(), data.lookup(key).is_some())
         }
         _ => (0, false),
     };
     set_value_property(realm, object, key, value.clone(), true)?;
     if let JsValue::Object(object_ref) = object {
         let data = object_ref.borrow();
-        if let Some(index) = data.props.get_index_of(key) {
+        if let Some(index) = data.lookup(key) {
             let mut entry = cache.borrow_mut();
-            entry.object_shape = data.shape;
+            entry.object_shape = data.shape_id();
             entry.holder = None;
             entry.receiver_proto = None;
-            entry.index = index as u32;
+            entry.index = index;
             entry.insert_shape = shape_before;
             entry.can_insert = !had_own;
             entry.own = true;
@@ -411,17 +396,17 @@ pub fn set_value_property(
             if data.put_array_value(realm, key, &new_value)?.is_some() {
                 return Ok(());
             }
-            if let Some(property) = data.props.get_mut(&canonical) {
-                if property.is_accessor() {
-                    let setter = property.set.as_deref().cloned();
+            if let Some(slot) = data.lookup(&canonical) {
+                if data.props[slot as usize].is_accessor() {
+                    let setter = data.props[slot as usize].set.as_deref().cloned();
                     drop(data);
                     if let Some(setter) = setter {
                         call_value(realm, setter, value.clone(), &[new_value])?;
                     }
                     return Ok(());
                 }
-                if property.writable {
-                    property.value = new_value;
+                if data.props[slot as usize].writable {
+                    data.props[slot as usize].value = new_value;
                 }
                 return Ok(());
             }
@@ -492,9 +477,9 @@ pub(crate) fn cached_global_get(
         let global = realm.global.borrow();
         let entry = cache.borrow();
         if entry.valid
-            && entry.object_shape == global.shape
-            && let Some((cached_key, property)) = global.props.get_index(entry.index as usize)
-            && cached_key == &key
+            && entry.object_shape == global.shape_id()
+            && global.shape.keys.get(entry.index as usize) == Some(&key)
+            && let Some(property) = global.props.get(entry.index as usize)
             && !property.is_accessor()
         {
             return Ok(Some(property.value.clone()));
@@ -503,10 +488,10 @@ pub(crate) fn cached_global_get(
     let value = global_get(realm, name)?;
     if value.is_some() {
         let global = realm.global.borrow();
-        if let Some(index) = global.props.get_index_of(&key) {
+        if let Some(index) = global.lookup(&key) {
             let mut entry = cache.borrow_mut();
-            entry.object_shape = global.shape;
-            entry.index = index as u32;
+            entry.object_shape = global.shape_id();
+            entry.index = index;
             entry.valid = true;
         }
     }

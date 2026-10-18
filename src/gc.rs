@@ -403,7 +403,7 @@ fn visit_children(entity: &Entity, visit: &mut dyn FnMut(&Entity)) {
                 return;
             };
             let data = object.borrow();
-            for property in data.props.values() {
+            for property in data.props.iter() {
                 value(&property.value, visit);
                 if let Some(get) = &property.get {
                     value(get, visit);

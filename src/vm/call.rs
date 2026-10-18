@@ -11,7 +11,7 @@ use std::rc::Rc;
 use super::ArgumentStack;
 use super::frame::{Frame, RunOutcome};
 use crate::bytecode::{ClassDef, Constant, FunctionDef};
-use crate::object::{ObjectData, ObjectKind, PropKey, Property};
+use crate::object::{ObjectData, ObjectKind, PropKey};
 use crate::runtime::Realm;
 use crate::value::{Env, EnvRef, JsResult, JsValue};
 
@@ -311,22 +311,9 @@ pub(crate) fn create_class(
         if method.is_getter || method.is_setter {
             let target_reference = target.to_ref();
             let mut data = target_reference.borrow_mut();
-            let property = data
-                .props
-                .entry(PropKey::from(method.name.as_ref()))
-                .or_insert_with(|| Property {
-                    value: JsValue::Undefined,
-                    get: None,
-                    set: None,
-                    writable: false,
-                    enumerable: false,
-                    configurable: true,
-                });
-            if method.is_getter {
-                property.get = Some(Box::new(function));
-            } else {
-                property.set = Some(Box::new(function));
-            }
+            let get = method.is_getter.then(|| function.clone());
+            let set = (!method.is_getter).then(|| function.clone());
+            data.define_accessor(PropKey::from(method.name.as_ref()), get, set, false);
         } else {
             target.set_key(PropKey::from(method.name.as_ref()), function);
         }
