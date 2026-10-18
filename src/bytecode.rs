@@ -97,6 +97,10 @@ pub enum Op {
     True,
     False,
     This,
+    /// Push the current callee, used for named function expression
+    /// self-reference, like QuickJS' function-scope `FVAR` binding
+    /// (quickjs.c:37379).
+    Callee,
     PushConst(u32),
     Pop,
     Dup,
@@ -187,6 +191,9 @@ pub enum Op {
     Return,
     ReturnUndefined,
     Throw,
+    /// Generator suspension with an absolute resume label
+    /// (`OP_yield`, quickjs.c:20871).
+    Yield(usize),
     Jump(usize),
     JumpIfFalse(usize),
     JumpIfTrue(usize),

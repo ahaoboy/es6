@@ -8,6 +8,7 @@
 mod call;
 mod error;
 mod frame;
+pub(crate) mod generator;
 mod iter;
 mod ops;
 mod property;
@@ -110,7 +111,7 @@ pub fn execute(
         None,
     )? {
         RunOutcome::Return(value) => Ok(value),
-        RunOutcome::Suspended => Ok(JsValue::Undefined),
+        RunOutcome::Suspended | RunOutcome::Yield { .. } => Ok(JsValue::Undefined),
     }
 }
 
@@ -135,7 +136,6 @@ pub(crate) fn run_frame(
     frame.event_loop = event_loop;
     frame.this = this;
     frame.callee = callee;
-    frame.stack.clear();
     frame.arguments = arguments;
     frame.pc = 0;
     frame.completion = completion;
@@ -144,6 +144,7 @@ pub(crate) fn run_frame(
     if let Some(frame) = frame {
         recycle_frame(realm, frame);
     }
+    // A suspended yield carries its own frame out to the generator.
     result
 }
 
@@ -182,6 +183,14 @@ fn run_loop(
                     return (Err(error), None);
                 }
                 return (Ok(RunOutcome::Suspended), None);
+            }
+            Ok(Step::Yield { value, resume_pc }) => {
+                // Generator suspension: the whole frame moves into the
+                // generator object with its resume point, like QuickJS
+                // stashing `cur_sp`/`cur_pc` in the generator (quickjs.c:20871).
+                frame.pc = resume_pc;
+                let value = RunOutcome::Yield { frame, value };
+                return (Ok(value), None);
             }
             Err(exception) => {
                 error::record_error_stack(&exception);
@@ -390,7 +399,7 @@ pub(crate) fn run_job(realm: &mut Realm, job: Job) -> JsResult<()> {
                 Ok(RunOutcome::Return(value)) => {
                     crate::promise::resolve(realm, &completion, value)?;
                 }
-                Ok(RunOutcome::Suspended) => {}
+                Ok(RunOutcome::Suspended | RunOutcome::Yield { .. }) => {}
                 Err(error) => {
                     clear_error_offset();
                     let _ = crate::promise::reject(realm, &completion, error);

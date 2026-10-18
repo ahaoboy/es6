@@ -231,8 +231,26 @@ pub enum ObjectKind {
     Date(f64),
     RegExp(Rc<RegExpData>),
     Iterator { items: Vec<JsValue>, index: usize },
+    /// Lazy array iterator, the equivalent of QuickJS'
+    /// `JS_CLASS_ARRAY_ITERATOR`: reads elements from the live array on
+    /// every `next` (ES2022 23.1.5.1).
+    ArrayIterator {
+        array: ObjRef,
+        index: usize,
+        entries: bool,
+    },
+    /// Lazy string iterator over UTF-16 code units (ES2022 23.1.5.2.1).
+    StringIterator {
+        text: Rc<str>,
+        index: usize,
+    },
     Map(Vec<(JsValue, JsValue)>),
     Set(Vec<JsValue>),
+    /// Weak collections: entries die with their keys (ES2022 25.3/25.4).
+    /// Keys are weak references, so the GC prunes dead entries; values stay
+    /// strongly held while the key lives, like QuickJS' weak ref lists.
+    WeakMap(Vec<(std::rc::Weak<RefCell<ObjectData>>, JsValue)>),
+    WeakSet(Vec<std::rc::Weak<RefCell<ObjectData>>>),
     Promise(Box<PromiseData>),
     ArrayBuffer(ArrayBufferData),
     DataView(DataViewData),
@@ -242,7 +260,30 @@ pub enum ObjectKind {
     /// quickjs.c:442). Storing it in an object keeps the whole suspended frame
     /// visible to the GC.
     AsyncFrame(Option<Box<crate::vm::Frame>>),
+    /// Generator object: the bytecode function plus its suspended frame,
+    /// the equivalent of QuickJS `JS_CLASS_GENERATOR` (quickjs.c:20871
+    /// `OP_yield` suspension).
+    Generator(GeneratorData),
     Error,
+}
+
+/// Generator bookkeeping (ES2022 27.5.1): the function, the creation-time
+/// receiver and arguments, and the suspended activation.
+pub struct GeneratorData {
+    pub function: Rc<JsFunction>,
+    pub this: JsValue,
+    pub arguments: Vec<JsValue>,
+    pub state: GeneratorState,
+}
+
+/// QuickJS suspends generators by stashing `JSStackFrame.cur_sp/cur_pc`
+/// inside the generator object (quickjs.c:20871); the whole `Frame` moves
+/// in and out here.
+pub enum GeneratorState {
+    SuspendedStart,
+    Executing,
+    SuspendedYield(Box<crate::vm::Frame>),
+    Completed,
 }
 
 impl ObjectKind {

@@ -64,13 +64,15 @@ pub fn compile_program(program: &Program) -> Result<Rc<FunctionDef>, ParseError>
     compiler.compile_script(&program.body)?;
     let strict = has_use_strict(&program.body);
     let def = compiler.finish("<eval>", 0, false, false, false, strict);
-    Ok(Rc::new(def))
+    // Top-level bytecode registers with the GC like QuickJS'
+    // `JS_GC_OBJ_TYPE_FUNCTION_BYTECODE` (quickjs.c:450).
+    Ok(crate::gc::register_def(Rc::new(def)))
 }
 
 pub fn compile_function_source(function: &Function) -> Result<Rc<FunctionDef>, ParseError> {
     let mut compiler = Compiler::new(false, Vec::new(), function.name.clone().unwrap_or_default());
     let def = compiler.compile_function(function, false, false)?;
-    Ok(def)
+    Ok(crate::gc::register_def(def))
 }
 
 /// Scope-resolving bytecode emitter. The two-level scope model corresponds to
@@ -191,7 +193,8 @@ impl Compiler {
             | Op::JumpIfNullish(value)
             | Op::JumpIfNullishKeep(value)
             | Op::TryStart(value)
-            | Op::IterNext(value) => *value = target,
+            | Op::IterNext(value)
+            | Op::Yield(value) => *value = target,
             _ => {}
         }
     }
@@ -330,6 +333,18 @@ impl Compiler {
             Some(())
         };
         let _ = arguments_slot;
+        // Named function expressions bind their own name in the function
+        // scope so the body can self-reference it, like QuickJS' function
+        // scope var for named expressions (`js_parse_function_decl2`,
+        // quickjs.c:37379).
+        if !function.is_arrow
+            && let Some(name) = &function.name
+            && !name.is_empty()
+        {
+            let slot = child.local_frames[0].declare(name);
+            child.emit(Op::Callee);
+            child.emit(Op::SetVar { depth: 0, slot });
+        }
         if let FunctionBody::Block(statements) = &function.body {
             for name in collect_var_names(statements) {
                 child.local_frames[0].declare(&name);

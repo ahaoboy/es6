@@ -24,6 +24,7 @@ pub mod builtins;
 pub mod bytecode;
 mod coerce;
 pub mod compiler;
+pub mod gc;
 pub mod lexer;
 pub mod object;
 pub mod parser;

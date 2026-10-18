@@ -143,6 +143,8 @@ pub struct Realm {
     pub promise_proto: ObjRef,
     pub array_buffer_proto: ObjRef,
     pub data_view_proto: ObjRef,
+    /// `%GeneratorPrototype%` (ES2022 27.5.2).
+    pub generator_proto: ObjRef,
     pub typed_array_protos: std::collections::HashMap<crate::object::TypedArrayKind, ObjRef>,
     pub symbol_counter: u32,
     pub symbols: Vec<Rc<str>>,
@@ -181,6 +183,7 @@ impl Realm {
         let promise_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let array_buffer_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let data_view_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
+        let generator_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let typed_array_protos = [
             crate::object::TypedArrayKind::Uint8,
             crate::object::TypedArrayKind::Uint8Clamped,
@@ -224,6 +227,7 @@ impl Realm {
             promise_proto,
             array_buffer_proto,
             data_view_proto,
+            generator_proto,
             typed_array_protos,
             symbol_counter: 1,
             symbols: Vec::new(),
@@ -343,6 +347,53 @@ impl Realm {
         iterator
     }
 
+    /// Live array iterator (ES2022 23.1.5.1), like QuickJS
+    /// `JS_CLASS_ARRAY_ITERATOR`: the elements are read from the array on
+    /// every step.
+    pub fn array_iterator(&self, array: ObjRef, entries: bool) -> ObjRef {
+        let mut data = ObjectData::ordinary(None);
+        data.kind = ObjectKind::ArrayIterator {
+            array,
+            index: 0,
+            entries,
+        };
+        data.class_name = "Array Iterator";
+        let iterator = allocate(data);
+        let next = self.native_function("next", 0, iterator_next);
+        iterator
+            .borrow_mut()
+            .define("next", crate::object::Property::hidden(next));
+        iterator
+    }
+
+    /// Lazy string iterator over UTF-16 code units (ES2022 23.1.5.2.1).
+    pub fn string_iterator(&self, text: Rc<str>) -> ObjRef {
+        let mut data = ObjectData::ordinary(None);
+        data.kind = ObjectKind::StringIterator { text, index: 0 };
+        data.class_name = "String Iterator";
+        let iterator = allocate(data);
+        let next = self.native_function("next", 0, iterator_next);
+        iterator
+            .borrow_mut()
+            .define("next", crate::object::Property::hidden(next));
+        iterator
+    }
+
+    /// Create a generator object (ES2022 27.5.1): the function plus its
+    /// creation-time receiver and arguments, suspended at the start, like
+    /// QuickJS `JS_CLASS_GENERATOR`.
+    pub fn generator(&self, function: Rc<JsFunction>, this: JsValue, arguments: Vec<JsValue>) -> ObjRef {
+        let mut data = ObjectData::ordinary(Some(self.generator_proto.clone()));
+        data.kind = ObjectKind::Generator(crate::object::GeneratorData {
+            function,
+            this,
+            arguments,
+            state: crate::object::GeneratorState::SuspendedStart,
+        });
+        data.class_name = "Generator";
+        allocate(data)
+    }
+
     pub fn native_function(
         &self,
         name: &str,
@@ -364,6 +415,7 @@ impl Realm {
         function: impl Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue>
             + 'static,
     ) -> JsValue {
+        let data = crate::gc::register_data(data);
         let function = Rc::new(JsFunction {
             name: Rc::from(name),
             length,
@@ -566,7 +618,10 @@ impl Realm {
     /// QuickJS `JS_ExecutePendingJob` (quickjs.c:2525): run one queued job.
     pub(crate) fn execute_pending_job(&mut self) -> Option<JsResult<()>> {
         let job = self.jobs.pop_front()?;
-        Some(crate::vm::run_job(self, job))
+        let result = crate::vm::run_job(self, job);
+        // A job boundary is a GC safe point.
+        crate::gc::trigger_gc();
+        Some(result)
     }
 
     pub(crate) fn drain_jobs(&mut self) -> JsResult<()> {
@@ -578,7 +633,7 @@ impl Realm {
 }
 
 fn allocate(data: ObjectData) -> ObjRef {
-    Rc::new(RefCell::new(data))
+    crate::gc::allocate_object(data)
 }
 
 fn line_column(source: &str, offset: usize) -> (usize, usize) {
@@ -609,6 +664,42 @@ fn iterator_next(realm: &mut Realm, this: &JsValue, _arguments: &[JsValue]) -> J
                     let value = items[*index].clone();
                     *index += 1;
                     (value, false)
+                } else {
+                    (JsValue::Undefined, true)
+                }
+            }
+            // Live array iterator (ES2022 23.1.5.1.1): reads the current
+            // element every step.
+            ObjectKind::ArrayIterator { array, index, entries } => {
+                let array = array.clone();
+                let current = *index;
+                let entries = *entries;
+                let length = array.borrow().array_len().unwrap_or(0);
+                if current >= length {
+                    (JsValue::Undefined, true)
+                } else {
+                    let value = array
+                        .borrow()
+                        .get_index_value(current as i32)
+                        .unwrap_or(JsValue::Undefined);
+                    *index += 1;
+                    if entries {
+                        let entry =
+                            realm.array(vec![JsValue::number(current as f64), value]);
+                        (JsValue::Object(entry), false)
+                    } else {
+                        (value, false)
+                    }
+                }
+            }
+            ObjectKind::StringIterator { text, index } => {
+                let text = text.clone();
+                let current = *index;
+                let units = crate::coerce::utf16_length(&text);
+                if current < units {
+                    let unit = crate::object::utf16_char(&text, current);
+                    *index += 1;
+                    (JsValue::string(unit.unwrap_or_default()), false)
                 } else {
                     (JsValue::Undefined, true)
                 }
@@ -655,6 +746,11 @@ impl Runtime {
 
     pub fn run_jobs(&self) -> Result<()> {
         self.context.run_jobs()
+    }
+
+    /// Run a full cycle collection, like `JS_RunGC` (quickjs.c:7483).
+    pub fn run_gc(&self) {
+        crate::gc::run_gc_now();
     }
 }
 
@@ -721,6 +817,9 @@ impl Context {
             let message = crate::vm::display_error(&realm, value.clone());
             Error::from_value(value, message)
         })?;
+        // Safe point for the cycle collector, like `js_trigger_gc`
+        // (quickjs.c:1679) firing after evaluation.
+        crate::gc::trigger_gc();
         Ok(value)
     }
 
@@ -772,6 +871,11 @@ impl Context {
     pub fn eval_value<T: crate::value::FromJs>(&self, source: &str) -> Result<T> {
         let value = self.eval(source)?;
         T::from_js(value).ok_or_else(|| Error::message("Unexpected JavaScript value type"))
+    }
+
+    /// Run a full cycle collection, like `JS_RunGC` (quickjs.c:7483).
+    pub fn run_gc(&self) {
+        crate::gc::run_gc_now();
     }
 
     pub fn execute_pending_job(&self) -> Result<bool> {

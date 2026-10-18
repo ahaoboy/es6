@@ -256,6 +256,8 @@ pub enum ExprKind {
     Spread(Box<Expr>),
     Await(Box<Expr>),
     Yield(Option<Box<Expr>>),
+    /// `yield*` delegation (ES2022 15.5.2.6).
+    YieldStar(Box<Expr>),
 }
 
 #[derive(Clone)]

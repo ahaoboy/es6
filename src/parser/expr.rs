@@ -260,6 +260,38 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
+        if self.current.is_ident("yield") && self.yield_allowed {
+            // `yield` and `yield*` (ES2022 15.5.2): the operand requires no
+            // line terminator, like `js_parse_assign_expr2` (quickjs.c:28240).
+            let yield_line = self.current.line;
+            self.advance()?;
+            let delegate = self.eat_punct(Punct::Star)?;
+            let same_line = self.current.line == yield_line;
+            let terminator = matches!(self.current.kind, TokenKind::Eof)
+                || self.current.is_punct(Punct::Semicolon)
+                || self.current.is_punct(Punct::RParen)
+                || self.current.is_punct(Punct::RBracket)
+                || self.current.is_punct(Punct::RBrace)
+                || self.current.is_punct(Punct::Comma)
+                || self.current.is_punct(Punct::Colon);
+            let argument = if delegate {
+                let argument = self.parse_assignment()?;
+                Some(Box::new(argument))
+            } else if same_line && !terminator {
+                let argument = self.parse_assignment()?;
+                Some(Box::new(argument))
+            } else {
+                None
+            };
+            return Ok(Expr {
+                kind: if delegate {
+                    ExprKind::YieldStar(argument.expect("yield* requires an operand"))
+                } else {
+                    ExprKind::Yield(argument)
+                },
+                span,
+            });
+        }
         if self.current.is_punct(Punct::Inc) || self.current.is_punct(Punct::Dec) {
             let op = if self.current.is_punct(Punct::Inc) {
                 UpdateOp::Increment

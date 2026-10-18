@@ -417,6 +417,7 @@ pub(super) fn uses_arguments_expr(expression: &Expr) -> bool {
             tag, expressions, ..
         } => uses_arguments_expr(tag) || expressions.iter().any(uses_arguments_expr),
         ExprKind::Yield(expression) => expression.as_deref().is_some_and(uses_arguments_expr),
+        ExprKind::YieldStar(expression) => uses_arguments_expr(expression),
     }
 }
 
@@ -468,6 +469,7 @@ pub(super) fn expr_is_stable(expression: &Expr) -> bool {
         | ExprKind::Spread(_)
         | ExprKind::Await(_)
         | ExprKind::Yield(_) => false,
+        | ExprKind::YieldStar(_) => false,
     }
 }
 

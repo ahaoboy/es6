@@ -22,10 +22,12 @@ pub struct Env {
 
 impl Env {
     pub fn new(size: usize, parent: Option<EnvRef>) -> EnvRef {
-        Rc::new(Self {
+        // Environments register with the GC like QuickJS'
+        // `JS_GC_OBJ_TYPE_VAR_REF` (quickjs.c:450).
+        crate::gc::register_env(Rc::new(Self {
             slots: RefCell::new(vec![JsValue::Undefined; size]),
             parent,
-        })
+        }))
     }
 
     #[inline(always)]

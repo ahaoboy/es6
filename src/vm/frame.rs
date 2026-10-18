@@ -20,11 +20,22 @@ pub(crate) enum Step {
     Continue,
     Return(JsValue),
     Await(JsValue),
+    /// `yield`: suspend the frame, resuming at `resume_pc` (quickjs
+    /// `OP_yield`, quickjs.c:20871).
+    Yield {
+        value: JsValue,
+        resume_pc: usize,
+    },
 }
 
 pub(crate) enum RunOutcome {
     Return(JsValue),
     Suspended,
+    /// The frame suspended at a `yield` and moved out with the value.
+    Yield {
+        frame: Box<Frame>,
+        value: JsValue,
+    },
 }
 
 /// Installed exception handler. `catch_pc` mirrors the recovery label of

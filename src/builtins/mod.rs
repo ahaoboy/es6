@@ -9,6 +9,7 @@ mod console;
 mod date;
 mod error;
 mod function;
+mod generator;
 mod global;
 mod json;
 mod map;
@@ -21,6 +22,7 @@ mod regexp;
 mod set;
 mod string;
 mod symbol;
+mod weakmap;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -51,6 +53,8 @@ pub fn install(realm: &mut Realm) {
     console::install(realm);
     message::install(realm);
     global::install(realm);
+    generator::install(realm);
+    weakmap::install(realm);
 }
 
 pub(crate) fn arg(arguments: &[JsValue], index: usize) -> JsValue {
@@ -348,7 +352,10 @@ pub(crate) fn object_kind_name(object: &ObjectData) -> &'static str {
         ObjectKind::TypedArray(data) => data.kind.name(),
         ObjectKind::Error => "Error",
         ObjectKind::Iterator { .. } => "Iterator",
+        ObjectKind::ArrayIterator { .. } => "Array Iterator",
+        ObjectKind::StringIterator { .. } => "String Iterator",
         ObjectKind::AsyncFrame(_) => "AsyncFunction",
+        ObjectKind::Generator(_) => "Generator",
         ObjectKind::Ordinary => "Object",
     }
 }

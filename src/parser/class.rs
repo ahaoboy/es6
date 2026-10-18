@@ -116,8 +116,11 @@ impl<'a> Parser<'a> {
     ) -> Result<Rc<Function>, ParseError> {
         let span = self.span();
         let name = property_name_string(&key);
+        let saved = self.yield_allowed;
+        self.yield_allowed = generator;
         let params = self.parse_parameters()?;
         let body = FunctionBody::Block(self.parse_block()?);
+        self.yield_allowed = saved;
         let _ = is_method;
         Ok(Rc::new(Function {
             name: Some(name),

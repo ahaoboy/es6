@@ -11,8 +11,7 @@ use super::{ArgumentStack, ValueStack, constant_string, constant_strings};
 use crate::bytecode::{CompareOp, Constant, FunctionDef, Op};
 use crate::object::{
     Object, ObjectData, ObjectKind, Property, PropKey, RegExpData,
-};
-use crate::value::JsValue;
+};use crate::value::JsValue;
 use crate::runtime::Realm;
 use crate::value::{Env, EnvRef, JsResult};
 
@@ -36,6 +35,9 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
         Op::True => frame.stack.push(JsValue::Bool(true)),
         Op::False => frame.stack.push(JsValue::Bool(false)),
         Op::This => frame.stack.push(frame.this.clone()),
+        Op::Callee => frame
+            .stack
+            .push(frame.callee.clone().unwrap_or(JsValue::Undefined)),
         Op::PushConst(index) => {
             let value = constant_value(realm, &frame.definition, index, frame.env.as_ref())?;
             frame.stack.push(value);
@@ -651,6 +653,10 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             let value = pop(&mut frame.stack)?;
             return Ok(Step::Await(value));
         }
+        Op::Yield(resume_pc) => {
+            let value = pop(&mut frame.stack)?;
+            return Ok(Step::Yield { value, resume_pc });
+        }
         Op::IncVar {
             depth,
             slot,
@@ -773,9 +779,60 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             frame.handlers.pop();
         }
         Op::IterInit => {
+            // `OP_for_of_start` (quickjs.c:19318): obtain the iterator without
+            // draining it. Fast paths for engine-internal iterables avoid the
+            // `Symbol.iterator` call, exactly like QuickJS' checks for its
+            // own iterator classes.
             let value = pop(&mut frame.stack)?;
-            let items = iterable_items(realm, value)?;
-            frame.stack.push(JsValue::Object(realm.iterator(items)));
+            let iterator = match &value {
+                JsValue::String(text) => {
+                    let text = text.clone();
+                    JsValue::Object(realm.string_iterator(text))
+                }
+                JsValue::Object(object) => {
+                    let data = object.borrow();
+                    match &data.kind {
+                        ObjectKind::Array(_) => {
+                            let array = object.clone();
+                            drop(data);
+                            JsValue::Object(realm.array_iterator(array, false))
+                        }
+                        ObjectKind::TypedArray(typed) => {
+                            let items = typed.values();
+                            drop(data);
+                            JsValue::Object(realm.iterator(items))
+                        }
+                        ObjectKind::Map(entries) => {
+                            let entries = entries.clone();
+                            drop(data);
+                            JsValue::Object(
+                                realm.iterator(
+                                    entries
+                                        .into_iter()
+                                        .map(|(key, value)| {
+                                            JsValue::Object(realm.array(vec![key, value]))
+                                        })
+                                        .collect(),
+                                ),
+                            )
+                        }
+                        ObjectKind::Set(values) => {
+                            let values = values.clone();
+                            drop(data);
+                            JsValue::Object(realm.iterator(values))
+                        }
+                        ObjectKind::Iterator { .. } | ObjectKind::Generator(_) => value.clone(),
+                        _ => {
+                            drop(data);
+                            super::iter::protocol_iterator(realm, &value)?
+                        }
+                    }
+                }
+                _ => {
+                    return Err(realm.type_error("Value is not iterable"));
+                }
+            };
+            frame.stack.push(iterator);
         }
         Op::ForInInit => {
             let value = pop(&mut frame.stack)?;
@@ -791,29 +848,16 @@ pub(crate) fn execute_op(realm: &mut Realm, frame: &mut Frame, op: Op) -> JsResu
             frame.stack.push(JsValue::Object(realm.iterator(keys)));
         }
         Op::IterNext(exit) => {
+            // `OP_for_of_next` (quickjs.c:19318): pull exactly one item. Fast
+            // paths cover the engine-internal iterators; everything else
+            // goes through the iterator protocol.
             let length = frame.stack.len();
             if length == 0 {
                 return Err(realm.type_error("Missing iterator"));
             }
-            let value = {
-                let JsValue::Object(object) = &frame.stack[length - 1] else {
-                    return Err(realm.type_error("Value is not an iterator"));
-                };
-                let mut data = object.borrow_mut();
-                match &mut data.kind {
-                    ObjectKind::Iterator { items, index } => {
-                        if *index < items.len() {
-                            let value = items[*index].clone();
-                            *index += 1;
-                            Some(value)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => return Err(realm.type_error("Value is not an iterator")),
-                }
-            };
-            match value {
+            let iterator = frame.stack[length - 1].clone();
+            let next = super::iter::advance_iterator(realm, &iterator)?;
+            match next {
                 Some(value) => frame.stack.push(value),
                 None => {
                     frame.stack.pop();

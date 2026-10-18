@@ -43,6 +43,9 @@ struct Parser<'a> {
     current: Token,
     previous_line: usize,
     allow_in: bool,
+    /// `yield` parses as an operator inside generator function bodies
+    /// (ES2022 15.5.2), tracked like QuickJS' func_kind checks.
+    yield_allowed: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -54,6 +57,7 @@ impl<'a> Parser<'a> {
             current,
             previous_line: 1,
             allow_in: true,
+            yield_allowed: false,
         })
     }
 

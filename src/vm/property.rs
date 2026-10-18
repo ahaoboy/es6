@@ -9,7 +9,7 @@ use std::rc::Rc;
 use super::call::call_value;
 use super::ops::pop;
 use super::ValueStack;
-use crate::object::{Object, ObjectData, PropCache, PropKey, Property, key_to_index};
+use crate::object::{Object, ObjectData, PropCache, PropKey, Property};
 use crate::runtime::Realm;
 use crate::value::{JsResult, JsValue};
 

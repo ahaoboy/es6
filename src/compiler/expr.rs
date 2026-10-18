@@ -266,11 +266,63 @@ impl Compiler {
                 self.emit(Op::Await);
             }
             ExprKind::Yield(expression) => {
+                // `OP_yield` (quickjs.c:20871): the operand suspends the
+                // frame; the resume label points after the yield.
                 if let Some(expression) = expression {
                     self.compile_expr(expression)?;
                 } else {
                     self.emit(Op::Undefined);
                 }
+                let jump = self.emit_jump(Op::Yield(0));
+                let resume = self.position();
+                self.patch_jump(jump, resume);
+            }
+            ExprKind::YieldStar(iterable) => {
+                // `yield*` compiles inline (ES2022 15.5.2.6), like QuickJS'
+                // `OP_yield_star`: two temp slots hold the inner iterator and
+                // the value sent back through each `yield`. Every
+                // `next(sent)` result is yielded until `done`; the inner
+                // return value becomes the expression value.
+                self.compile_expr(iterable)?;
+                let (iter_depth, iter_slot) = self.alloc_temp();
+                self.emit(Op::SetVar {
+                    depth: iter_depth,
+                    slot: iter_slot,
+                });
+                let (sent_depth, sent_slot) = self.alloc_temp();
+                self.emit(Op::Undefined);
+                self.emit(Op::SetVar {
+                    depth: sent_depth,
+                    slot: sent_slot,
+                });
+                let start = self.position();
+                self.emit(Op::GetVar {
+                    depth: iter_depth,
+                    slot: iter_slot,
+                });
+                self.emit(Op::Dup);
+                self.emit_get_prop_const("next");
+                self.emit(Op::GetVar {
+                    depth: sent_depth,
+                    slot: sent_slot,
+                });
+                self.emit(Op::CallMethod(1));
+                self.emit(Op::Dup);
+                self.emit_get_prop_const("done");
+                let done_jump = self.emit_jump(Op::JumpIfTrue(0));
+                self.emit_get_prop_const("value");
+                let yield_jump = self.emit_jump(Op::Yield(0));
+                let resume = self.position();
+                self.patch_jump(yield_jump, resume);
+                // The resumed sent value is on the stack: store it back.
+                self.emit(Op::SetVar {
+                    depth: sent_depth,
+                    slot: sent_slot,
+                });
+                self.emit(Op::Jump(start));
+                let done = self.position();
+                self.patch_jump(done_jump, done);
+                self.emit_get_prop_const("value");
             }
         }
         Ok(())

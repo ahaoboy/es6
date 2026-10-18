@@ -14,8 +14,11 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let saved = self.yield_allowed;
+        self.yield_allowed = is_generator;
         let params = self.parse_parameters()?;
         let body = FunctionBody::Block(self.parse_block()?);
+        self.yield_allowed = saved;
         Ok(Rc::new(Function {
             name,
             params,
@@ -38,8 +41,11 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let saved = self.yield_allowed;
+        self.yield_allowed = is_generator;
         let params = self.parse_parameters()?;
         let body = FunctionBody::Block(self.parse_block()?);
+        self.yield_allowed = saved;
         Ok(Rc::new(Function {
             name,
             params,

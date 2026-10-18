@@ -59,6 +59,21 @@ pub(crate) fn call_value_owned(
         .def
         .clone()
         .ok_or_else(|| realm.type_error("Invalid function"))?;
+    if definition.is_generator {
+        // Calling a generator function creates a generator object without
+        // running the body (ES2022 15.5.1.1), like QuickJS' generator call
+        // path (quickjs.c:20871).
+        let this = if this.is_nullish() && !definition.strict {
+            JsValue::Object(realm.global.clone())
+        } else {
+            this
+        };
+        return Ok(JsValue::Object(realm.generator(
+            function,
+            this,
+            arguments.to_vec(),
+        )));
+    }
     let env = definition.use_env.then(|| {
         let parent = function.env.clone().unwrap_or_else(|| Env::new(0, None));
         Env::new(definition.env_size as usize, Some(parent))
@@ -90,14 +105,14 @@ pub(crate) fn call_value_owned(
     let Some(completion) = completion else {
         return match result? {
             RunOutcome::Return(value) => Ok(value),
-            RunOutcome::Suspended => Ok(JsValue::Undefined),
+            RunOutcome::Suspended | RunOutcome::Yield { .. } => Ok(JsValue::Undefined),
         };
     };
     match result {
         Ok(RunOutcome::Return(value)) => {
             crate::promise::resolve(realm, &completion, value)?;
         }
-        Ok(RunOutcome::Suspended) => {}
+        Ok(RunOutcome::Suspended | RunOutcome::Yield { .. }) => {}
         Err(error) => {
             crate::promise::reject(realm, &completion, error)?;
         }
