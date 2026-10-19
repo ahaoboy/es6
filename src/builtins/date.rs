@@ -1,6 +1,5 @@
-//! Date built-in. All conversions run on the `time` crate with UTC offsets,
-//! mirroring QuickJS' `js_date_*` (quickjs.c) helpers built on MakeDay /
-//! MakeTime / MakeDay computations (ES2022 20.4.1.11+) and TimeClip.
+//! Date built-in. Conversions use the engine's own MakeDay / MakeTime /
+//! TimeClip helpers (ES2022 20.4.1.11+), mirroring QuickJS' `js_date_*`.
 
 use crate::gc::{Gc, GcRefCell};
 
@@ -86,6 +85,26 @@ pub fn install(realm: &mut Realm) {
         1,
         set_utc_milliseconds,
     );
+    #[cfg(not(feature = "intl"))]
+    {
+        define_method(realm, &prototype, "toLocaleString", 0, to_date_string);
+        define_method(
+            realm,
+            &prototype,
+            "toLocaleDateString",
+            0,
+            to_date_string_part,
+        );
+        define_method(
+            realm,
+            &prototype,
+            "toLocaleTimeString",
+            0,
+            to_time_string_part,
+        );
+    }
+    #[cfg(feature = "intl")]
+    crate::builtins::intl::install_date_methods(realm, &prototype);
 }
 
 fn constructor(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {

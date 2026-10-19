@@ -320,6 +320,8 @@ pub enum ObjectKind {
     BoxedNumber(f64),
     BoxedBool(bool),
     Date(f64),
+    #[cfg(feature = "intl")]
+    IntlDateTimeFormat(Box<IntlDateTimeFormatData>),
     RegExp(Rc<RegExpData>),
     Iterator {
         items: Vec<JsValue>,
@@ -569,6 +571,8 @@ unsafe impl crate::gc::Trace for ObjectKind {
             ObjectKind::TypedArray(data) => mark(data),
             ObjectKind::AsyncFrame(Some(frame)) => mark(&**frame),
             ObjectKind::Generator(data) => mark(data),
+            #[cfg(feature = "intl")]
+            ObjectKind::IntlDateTimeFormat(_) => {}
             ObjectKind::Ordinary
             | ObjectKind::BoxedString(_)
             | ObjectKind::BoxedNumber(_)
@@ -581,4 +585,20 @@ unsafe impl crate::gc::Trace for ObjectKind {
             | ObjectKind::Error => {}
         }
     });
+}
+#[cfg(feature = "intl")]
+pub struct IntlDateTimeFormatData {
+    pub(crate) formatter: icu_datetime::DateTimeFormatter<
+        icu_datetime::fieldsets::enums::CompositeDateTimeFieldSet,
+    >,
+    pub(crate) locale: icu_locale::Locale,
+    pub(crate) time_zone: jiff::tz::TimeZone,
+    pub(crate) time_zone_name: String,
+    pub(crate) date_fields: Option<icu_datetime::fieldsets::builder::DateFields>,
+    pub(crate) time_precision: Option<icu_datetime::options::TimePrecision>,
+    pub(crate) date_style: Option<String>,
+    pub(crate) time_style: Option<String>,
+    pub(crate) hour12: Option<bool>,
+    pub(crate) calendar: String,
+    pub(crate) numbering_system: String,
 }

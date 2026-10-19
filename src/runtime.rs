@@ -136,6 +136,11 @@ pub struct Realm {
     pub uri_error_proto: ObjRef,
     pub regexp_proto: ObjRef,
     pub date_proto: ObjRef,
+    /// `%Intl%` namespace and `%Intl.DateTimeFormat.prototype%`.
+    #[cfg(feature = "intl")]
+    pub intl_proto: ObjRef,
+    #[cfg(feature = "intl")]
+    pub intl_date_time_format_proto: ObjRef,
     pub map_proto: ObjRef,
     pub set_proto: ObjRef,
     pub symbol_proto: ObjRef,
@@ -193,6 +198,10 @@ impl Realm {
         let uri_error_proto = allocate(ObjectData::ordinary(Some(error_proto.clone())));
         let regexp_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let date_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
+        #[cfg(feature = "intl")]
+        let intl_proto = object_proto.clone();
+        #[cfg(feature = "intl")]
+        let intl_date_time_format_proto = object_proto.clone();
         let map_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let set_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
         let symbol_proto = allocate(ObjectData::ordinary(Some(object_proto.clone())));
@@ -239,6 +248,10 @@ impl Realm {
             uri_error_proto,
             regexp_proto,
             date_proto,
+            #[cfg(feature = "intl")]
+            intl_proto,
+            #[cfg(feature = "intl")]
+            intl_date_time_format_proto,
             map_proto,
             set_proto,
             symbol_proto,

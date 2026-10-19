@@ -14,6 +14,8 @@ mod function;
 mod generator;
 mod global;
 pub(crate) mod json;
+#[cfg(feature = "intl")]
+mod intl;
 mod map;
 mod math;
 mod message;
@@ -51,6 +53,8 @@ pub fn install(realm: &mut Realm) {
     symbol::install(realm);
     promise::install(realm);
     date::install(realm);
+    #[cfg(feature = "intl")]
+    intl::install(realm);
     #[cfg(feature = "console")]
     console::install(realm);
     message::install(realm);
@@ -353,6 +357,8 @@ pub(crate) fn object_kind_name(object: &ObjectData) -> &'static str {
         ObjectKind::BoxedNumber(_) => "Number",
         ObjectKind::BoxedBool(_) => "Boolean",
         ObjectKind::Date(_) => "Date",
+        #[cfg(feature = "intl")]
+        ObjectKind::IntlDateTimeFormat(_) => "Intl.DateTimeFormat",
         ObjectKind::RegExp(_) => "RegExp",
         ObjectKind::Map(_) => "Map",
         ObjectKind::Set(_) => "Set",

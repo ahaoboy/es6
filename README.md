@@ -17,6 +17,17 @@ The CLI is enabled by default. For library-only builds:
 cargo build --release --no-default-features
 ```
 
+Localized date formatting is optional because the ICU4X/CLDR data is large:
+
+```sh
+cargo build --release --features intl
+```
+
+The `intl` feature adds `Intl.DateTimeFormat` and
+`Date.prototype.toLocaleString` / `toLocaleDateString` / `toLocaleTimeString`.
+It uses the system time zone and DST rules; the regular Date arithmetic remains
+the specification-defined UTC implementation.
+
 CLI options:
 
 ```text
@@ -66,6 +77,7 @@ src/
   promise.rs  promise reactions, combinator records, job queue
   runtime.rs  Realm, Runtime and Context
   builtins/   one module per constructor/prototype pair
+              (`intl.rs` is compiled with the optional `intl` feature)
   coerce.rs   ToPrimitive/ToNumber/ToString and UTF-16 helpers
   api.rs      rquickjs-shaped lifetime-bound handles
   module.rs   module declaration, evaluation and exports
@@ -150,4 +162,7 @@ like QuickJS' stack limit); the CLI runs the engine on a 64 MB stack.
 - Strings are UTF-8 backed; unpaired surrogates become U+FFFD, and the
   engine cannot represent lone surrogate code units (UTF-16 code-unit
   indexing and lengths are correct).
-- Date handling is UTC (`getTimezoneOffset()` is always `0`).
+- Date local-time getters/setters and `getTimezoneOffset()` remain UTC. With
+  the optional `intl` feature, `Date.prototype.toLocale*` and
+  `Intl.DateTimeFormat` use the system time zone and DST rules; other Intl
+  constructors and the full ECMA-402 option set are not implemented.
