@@ -9,6 +9,8 @@ modules = ["console", "fs", "os", "path", "timers"]
 # Optional CLDR/ICU4X-backed Intl support. Kept out of the default build
 # because the locale data and time zone database add significant binary size.
 intl = ["dep:icu_datetime", "dep:icu_locale", "dep:writeable", "dep:jiff"]
+# Experimental foundation for the staged register/8-byte-value core.
+oxide_core = []
 cli = ["dep:clap", "dep:miette"]
 console = []
 fs = []

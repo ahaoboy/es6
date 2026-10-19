@@ -49,6 +49,8 @@ pub mod lexer;
 mod module;
 mod modules;
 pub mod object;
+#[cfg(feature = "oxide_core")]
+pub mod oxide_core;
 pub mod parser;
 mod promise;
 pub mod runtime;
