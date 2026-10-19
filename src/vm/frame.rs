@@ -259,3 +259,42 @@ impl Frame {
         }
     }
 }
+
+impl boa_gc::Finalize for Handler {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for Handler {
+    boa_gc::custom_trace!(this, mark, {
+        if let Some(env) = &this.env {
+            mark(env);
+        }
+    });
+}
+
+impl boa_gc::Finalize for Frame {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for Frame {
+    boa_gc::custom_trace!(this, mark, {
+        if let Some(env) = &this.env {
+            mark(env);
+        }
+        for value in &this.locals {
+            mark(value);
+        }
+        mark(&this.this);
+        if let Some(callee) = &this.callee {
+            mark(callee);
+        }
+        for value in &this.stack {
+            mark(value);
+        }
+        for value in &this.arguments {
+            mark(value);
+        }
+        for handler in &this.handlers {
+            mark(handler);
+        }
+        if let Some(completion) = &this.completion {
+            mark(completion);
+        }
+    });
+}

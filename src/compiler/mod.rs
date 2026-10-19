@@ -99,9 +99,9 @@ pub fn compile_program(program: &Program) -> Result<Rc<FunctionDef>, ParseError>
     compiler.compile_script(&program.body)?;
     let strict = has_use_strict(&program.body);
     let def = compiler.finish("<eval>", 0, false, false, false, strict);
-    // Top-level bytecode registers with the GC like QuickJS'
-    // `JS_GC_OBJ_TYPE_FUNCTION_BYTECODE` (quickjs.c:450).
-    Ok(crate::gc::register_def(Rc::new(def)))
+    // Top-level bytecode is an acyclic compile-time tree; it stays `Rc` and
+    // does not participate in tracing.
+    Ok(Rc::new(def))
 }
 
 /// Compile an ES module body into a function taking the exports namespace.
@@ -124,13 +124,13 @@ pub fn compile_module(program: &Program) -> Result<Rc<FunctionDef>, ParseError> 
         span: Span::default(),
     };
     let def = compiler.compile_function(&function, false, false, false)?;
-    Ok(crate::gc::register_def(def))
+    Ok(def)
 }
 
 pub fn compile_function_source(function: &Function) -> Result<Rc<FunctionDef>, ParseError> {
     let mut compiler = Compiler::new(false, Vec::new(), function.name.clone().unwrap_or_default());
     let def = compiler.compile_function(function, false, false, false)?;
-    Ok(crate::gc::register_def(def))
+    Ok(def)
 }
 
 /// Scope-resolving bytecode emitter. The two-level scope model corresponds to

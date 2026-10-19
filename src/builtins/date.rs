@@ -2,8 +2,7 @@
 //! mirroring QuickJS' `js_date_*` (quickjs.c) helpers built on MakeDay /
 //! MakeTime / MakeDay computations (ES2022 20.4.1.11+) and TimeClip.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use boa_gc::{Gc, GcRefCell};
 
 use super::*;
 use crate::object::{ObjectData, ObjectKind};
@@ -111,7 +110,7 @@ fn constructor(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsRe
         make_date(year, month, date, hours, minutes, seconds, milliseconds)
     };
     let object = ObjectData::date(value, Some(realm.date_proto.clone()));
-    Ok(JsValue::Object(Rc::new(RefCell::new(object))))
+    Ok(JsValue::Object(Gc::new(GcRefCell::new(object))))
 }
 
 fn now_value() -> f64 {

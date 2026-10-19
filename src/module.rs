@@ -85,7 +85,6 @@ impl<'js> Module<'js> {
             let message = crate::vm::display_error(&realm, value.clone());
             Error::from_value(value, message)
         })?;
-        crate::gc::trigger_gc();
         Ok(Object::from_raw(
             self.ctx,
             crate::object::Object::from_ref(exports),

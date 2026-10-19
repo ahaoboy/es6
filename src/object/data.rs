@@ -183,7 +183,7 @@ pub struct JsFunction {
     /// when the function object is built; most closures are never used as
     /// constructors, so creating it on first access removes an allocation and
     /// two property insertions from every closure creation.
-    pub prototype: RefCell<Option<ObjRef>>,
+    pub prototype: GcRefCell<Option<ObjRef>>,
 }
 
 impl JsFunction {
@@ -217,14 +217,14 @@ impl JsFunction {
             length,
             native: Some(Rc::new(function)),
             native_data: None,
-            data: Rc::new(RefCell::new(Vec::new())),
+            data: Gc::new(GcRefCell::new(Vec::new())),
             def: None,
             env: None,
             bound: None,
             lexical_this: None,
             instance_init: None,
             has_super: false,
-            prototype: RefCell::new(None),
+            prototype: GcRefCell::new(None),
         }
     }
 
@@ -294,7 +294,7 @@ impl std::hash::Hash for MapKey {
             }
             JsValue::Object(value) => {
                 6u8.hash(state);
-                (Rc::as_ptr(value) as usize).hash(state);
+                (value.as_ref() as *const GcRefCell<ObjectData> as usize).hash(state);
             }
         }
     }
@@ -343,8 +343,8 @@ pub enum ObjectKind {
     /// Weak collections: entries die with their keys (ES2022 25.3/25.4).
     /// Keys are weak references, so the GC prunes dead entries; values stay
     /// strongly held while the key lives, like QuickJS' weak ref lists.
-    WeakMap(Vec<(std::rc::Weak<RefCell<ObjectData>>, JsValue)>),
-    WeakSet(Vec<std::rc::Weak<RefCell<ObjectData>>>),
+    WeakMap(WeakObjectMap),
+    WeakSet(WeakObjectSet),
     Promise(Box<PromiseData>),
     ArrayBuffer(ArrayBufferData),
     DataView(DataViewData),
@@ -416,4 +416,169 @@ pub struct PromiseData {
     pub value: JsValue,
     pub reactions: Vec<PromiseReaction>,
     pub handled: bool,
+}
+
+impl Finalize for JsFunction {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for JsFunction {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.data);
+        if let Some(env) = &this.env {
+            mark(env);
+        }
+        if let Some(bound) = &this.bound {
+            mark(bound);
+        }
+        if let Some(value) = &this.lexical_this {
+            mark(value);
+        }
+        mark(&this.prototype);
+    });
+}
+
+impl Finalize for BoundFunction {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for BoundFunction {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.target);
+        mark(&this.this);
+        for argument in &this.arguments {
+            mark(argument);
+        }
+    });
+}
+
+impl Finalize for ArrayData {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for ArrayData {
+    boa_gc::custom_trace!(this, mark, {
+        for value in this.items.iter().flatten() {
+            mark(value);
+        }
+    });
+}
+
+impl Finalize for ArrayBufferData {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for ArrayBufferData {
+    boa_gc::custom_trace!(this, mark, {});
+}
+
+impl Finalize for DataViewData {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for DataViewData {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.buffer);
+    });
+}
+
+impl Finalize for TypedArrayData {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for TypedArrayData {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.buffer);
+    });
+}
+
+impl Finalize for GeneratorData {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for GeneratorData {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&*this.function);
+        mark(&this.this);
+        for argument in &this.arguments {
+            mark(argument);
+        }
+        mark(&this.state);
+    });
+}
+
+impl Finalize for GeneratorState {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for GeneratorState {
+    boa_gc::custom_trace!(this, mark, {
+        if let GeneratorState::SuspendedYield(frame) = this {
+            mark(&**frame);
+        }
+    });
+}
+
+impl Finalize for PromiseReaction {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for PromiseReaction {
+    boa_gc::custom_trace!(this, mark, {
+        if let Some(value) = &this.on_fulfilled {
+            mark(value);
+        }
+        if let Some(value) = &this.on_rejected {
+            mark(value);
+        }
+        if let Some(promise) = &this.promise {
+            mark(promise);
+        }
+    });
+}
+
+impl Finalize for PromiseData {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for PromiseData {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.value);
+        for reaction in &this.reactions {
+            mark(reaction);
+        }
+    });
+}
+
+impl Finalize for MapKey {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for MapKey {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.0);
+    });
+}
+
+impl Finalize for ObjectKind {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for ObjectKind {
+    boa_gc::custom_trace!(this, mark, {
+        match this {
+            ObjectKind::Array(data) => mark(data),
+            ObjectKind::Function(function) => mark(&**function),
+            ObjectKind::Iterator { items, .. } => {
+                for value in items {
+                    mark(value);
+                }
+            }
+            ObjectKind::ArrayIterator { array, .. } => mark(array),
+            ObjectKind::Map(map) => {
+                for (key, value) in map {
+                    mark(key);
+                    mark(value);
+                }
+            }
+            ObjectKind::Set(set) => {
+                for key in set {
+                    mark(key);
+                }
+            }
+            ObjectKind::WeakMap(map) => mark(map),
+            ObjectKind::WeakSet(set) => mark(set),
+            ObjectKind::Promise(data) => mark(&**data),
+            ObjectKind::DataView(data) => mark(data),
+            ObjectKind::TypedArray(data) => mark(data),
+            ObjectKind::AsyncFrame(Some(frame)) => mark(&**frame),
+            ObjectKind::Generator(data) => mark(data),
+            ObjectKind::Ordinary
+            | ObjectKind::BoxedString(_)
+            | ObjectKind::BoxedNumber(_)
+            | ObjectKind::BoxedBool(_)
+            | ObjectKind::Date(_)
+            | ObjectKind::RegExp(_)
+            | ObjectKind::StringIterator { .. }
+            | ObjectKind::ArrayBuffer(_)
+            | ObjectKind::AsyncFrame(None)
+            | ObjectKind::Error => {}
+        }
+    });
 }

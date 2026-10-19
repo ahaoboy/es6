@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use boa_gc::{Finalize, Gc, GcRefCell};
 
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
@@ -10,14 +12,16 @@ use crate::runtime::Realm;
 use crate::string::JsString;
 use crate::value::{EnvRef, JsResult, JsValue};
 
-pub type ObjRef = Rc<RefCell<ObjectData>>;
+pub type ObjRef = Gc<GcRefCell<ObjectData>>;
 pub type NativeFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsValue>>;
 /// Native function with a shared, GC-visible data cell, the equivalent of
 /// QuickJS C functions with data (`js_c_function_data`, quickjs.c:6595):
 /// the data array is walked by the GC exactly like QuickJS'
 /// `mark_children` (quickjs.c:7255).
 pub type DataFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue>>;
-pub type NativeData = Rc<RefCell<Vec<JsValue>>>;
+pub type NativeData = Gc<GcRefCell<Vec<JsValue>>>;
+pub type WeakObjectMap = boa_gc::WeakMap<GcRefCell<ObjectData>, JsValue>;
+pub type WeakObjectSet = boa_gc::WeakMap<GcRefCell<ObjectData>, ()>;
 
 /// Shared object shape, the counterpart of QuickJS `JSShape` (quickjs.c:1102):
 /// an immutable key vector plus a key-to-slot index. Objects with the same
@@ -187,15 +191,16 @@ impl LiteralTemplate {
 
 /// Monomorphic property cache for one constant access site. It mirrors
 /// QuickJS' `JSPropCacheEntry`: the receiver shape guards the prototype chain,
-/// while a weak holder reference keeps the cached slot alive and verifiable.
+/// while the holder depth and shape keep the cached slot verifiable.
 #[derive(Clone, Default)]
 pub struct PropCache {
     pub object_shape: u64,
-    pub holder: Option<Weak<RefCell<ObjectData>>>,
     pub holder_shape: u64,
-    /// Raw pointer identity of the receiver's prototype at cache time. The
-    /// receiver keeps it alive and prototype_generation guards chain
-    /// changes, so a hit only compares addresses.
+    /// Number of prototype-chain edges from the receiver to the holder.
+    pub holder_depth: u32,
+    /// Raw address of the receiver's prototype at cache time. The receiver
+    /// keeps the prototype alive while the cache entry is used, and
+    /// `prototype_generation` guards chain changes.
     pub receiver_proto: Option<usize>,
     pub prototype_generation: u64,
     pub index: u32,
@@ -950,3 +955,31 @@ mod wrappers;
 
 pub use data::*;
 pub use wrappers::*;
+
+impl Finalize for Property {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for Property {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.value);
+        if let Some(get) = &this.get {
+            mark(&**get);
+        }
+        if let Some(set) = &this.set {
+            mark(&**set);
+        }
+    });
+}
+
+impl Finalize for ObjectData {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for ObjectData {
+    boa_gc::custom_trace!(this, mark, {
+        for property in &this.props {
+            mark(property);
+        }
+        if let Some(prototype) = &this.prototype {
+            mark(prototype);
+        }
+        mark(&this.kind);
+    });
+}

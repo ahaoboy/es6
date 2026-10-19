@@ -1,5 +1,4 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use boa_gc::{Gc, GcRefCell};
 
 use super::*;
 use crate::object::{MapKey, ObjectData, ObjectKind};
@@ -26,7 +25,7 @@ pub fn install(realm: &mut Realm) {
 }
 
 fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
-    let object = Rc::new(RefCell::new(ObjectData::map(
+    let object = Gc::new(GcRefCell::new(ObjectData::map(
         Some(realm.map_proto.clone()),
         Vec::new(),
     )));
@@ -46,7 +45,7 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
     Ok(JsValue::Object(object))
 }
 
-fn with_map(realm: &Realm, this: &JsValue) -> JsResult<Rc<RefCell<ObjectData>>> {
+fn with_map(realm: &Realm, this: &JsValue) -> JsResult<crate::object::ObjRef> {
     let object = this
         .as_object()
         .ok_or_else(|| realm.type_error("Map method called on incompatible receiver"))?;

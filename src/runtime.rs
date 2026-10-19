@@ -1,3 +1,4 @@
+use boa_gc::{Gc, GcRefCell};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
@@ -449,7 +450,6 @@ impl Realm {
         data: crate::object::NativeData,
         function: impl Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue> + 'static,
     ) -> JsValue {
-        let data = crate::gc::register_data(data);
         let function = Rc::new(JsFunction {
             name: Rc::from(name),
             length,
@@ -462,7 +462,7 @@ impl Realm {
             lexical_this: None,
             instance_init: None,
             has_super: false,
-            prototype: std::cell::RefCell::new(None),
+            prototype: GcRefCell::new(None),
         });
         JsValue::Object(self.function_object(function))
     }
@@ -562,14 +562,14 @@ impl Realm {
             length,
             native: None,
             native_data: None,
-            data: Rc::new(RefCell::new(Vec::new())),
+            data: Gc::new(GcRefCell::new(Vec::new())),
             def: Some(def),
             env: Some(env),
             bound: None,
             lexical_this,
             instance_init,
             has_super,
-            prototype: std::cell::RefCell::new(None),
+            prototype: GcRefCell::new(None),
         });
         let object = self.function_object(function);
         // `.prototype` is created on first access (`Realm::function_prototype`),
@@ -697,8 +697,6 @@ impl Realm {
     pub(crate) fn execute_pending_job(&mut self) -> Option<JsResult<()>> {
         let job = self.jobs.pop_front()?;
         let result = crate::vm::run_job(self, job);
-        // A job boundary is a GC safe point.
-        crate::gc::trigger_gc();
         Some(result)
     }
 
@@ -904,9 +902,6 @@ impl Context {
             let message = crate::vm::display_error(&realm, value.clone());
             Error::from_value(value, message)
         })?;
-        // Safe point for the cycle collector, like `js_trigger_gc`
-        // (quickjs.c:1679) firing after evaluation.
-        crate::gc::trigger_gc();
         Ok(value)
     }
 

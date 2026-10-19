@@ -2,6 +2,7 @@ use super::*;
 use crate::object::PromiseState;
 use crate::promise as core;
 use crate::value::JsValue;
+use boa_gc::{Gc, GcRefCell};
 
 // QuickJS: JS_AddIntrinsicPromise / js_promise_* (quickjs.c). The state and
 // job machinery lives in `crate::promise`, mirroring `JSPromiseData` and
@@ -27,9 +28,8 @@ fn constructor(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsR
     let promise = realm.promise();
     // The resolve/reject pair carries the promise in a GC-visible data cell
     // (quickjs `js_c_function_data`, quickjs.c:6595).
-    let data: crate::object::NativeData = Rc::new(std::cell::RefCell::new(vec![JsValue::Object(
-        promise.clone(),
-    )]));
+    let data: crate::object::NativeData =
+        Gc::new(GcRefCell::new(vec![JsValue::Object(promise.clone())]));
     let resolve = realm.native_function_data("", 1, data.clone(), executor_resolve);
     let reject = realm.native_function_data("", 1, data, executor_reject);
     if let Err(error) = super::call(realm, executor, JsValue::Undefined, &[resolve, reject]) {

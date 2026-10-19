@@ -7,8 +7,7 @@
 //! functions with data (`js_c_function_data`, quickjs.c:6595) whose payloads
 //! `mark_children` walks (quickjs.c:7255).
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use boa_gc::{Gc, GcRefCell};
 
 use crate::object::{NativeData, ObjRef, ObjectKind, PromiseReaction, PromiseState, PropKey};
 use crate::runtime::Realm;
@@ -80,7 +79,7 @@ pub fn resolve_value(realm: &mut Realm, value: JsValue) -> JsResult<ObjRef> {
 /// `js_promise_resolve_function`: a self-resolving promise rejects.
 pub fn resolve(realm: &mut Realm, promise: &ObjRef, value: JsValue) -> JsResult<()> {
     if let JsValue::Object(object) = &value
-        && Rc::ptr_eq(object, promise)
+        && Gc::ptr_eq(object, promise)
     {
         return reject(
             realm,
@@ -182,7 +181,7 @@ pub fn await_value(
 ) -> JsResult<()> {
     let promise = resolve_value(realm, value)?;
     let frame_object = realm.async_frame(frame);
-    let data: NativeData = Rc::new(RefCell::new(vec![
+    let data: NativeData = Gc::new(GcRefCell::new(vec![
         JsValue::Object(frame_object),
         JsValue::Object(completion),
     ]));
@@ -261,7 +260,7 @@ pub fn finally(realm: &mut Realm, this: &JsValue, callback: JsValue) -> JsResult
     }
     let promise = promise_object(this).ok_or_else(|| realm.type_error("Invalid promise"))?;
     let result = realm.promise();
-    let data: NativeData = Rc::new(RefCell::new(vec![
+    let data: NativeData = Gc::new(GcRefCell::new(vec![
         JsValue::Object(result.clone()),
         callback,
     ]));
@@ -287,7 +286,7 @@ fn finally_then(
     let value = crate::builtins::arg(arguments, 0);
     let callback_result = run_finally_callback(realm, &callback)?;
     let chained = resolve_value(realm, callback_result)?;
-    let data: NativeData = Rc::new(RefCell::new(vec![result, value]));
+    let data: NativeData = Gc::new(GcRefCell::new(vec![result, value]));
     let settle = realm.native_function_data("", 1, data.clone(), pass_fulfilled);
     let propagate = realm.native_function_data("", 1, data, propagate_rejection);
     attach(realm, &chained, Some(settle), Some(propagate), None)?;
@@ -306,7 +305,7 @@ fn finally_catch(
     let error = crate::builtins::arg(arguments, 0);
     let callback_result = run_finally_callback(realm, &callback)?;
     let chained = resolve_value(realm, callback_result)?;
-    let data: NativeData = Rc::new(RefCell::new(vec![result, error]));
+    let data: NativeData = Gc::new(GcRefCell::new(vec![result, error]));
     let settle = realm.native_function_data("", 1, data.clone(), reject_with_captured);
     let propagate = realm.native_function_data("", 1, data, propagate_rejection);
     attach(realm, &chained, Some(settle), Some(propagate), None)?;
@@ -384,7 +383,7 @@ pub fn all(realm: &mut Realm, iterable: JsValue) -> JsResult<JsValue> {
     let record = combinator_record(realm, &result, items.len());
     for (index, item) in items.into_iter().enumerate() {
         let promise = resolve_value(realm, item)?;
-        let element: NativeData = Rc::new(RefCell::new(vec![
+        let element: NativeData = Gc::new(GcRefCell::new(vec![
             JsValue::Object(record.clone()),
             JsValue::number(index as f64),
         ]));
@@ -405,7 +404,7 @@ pub fn race(realm: &mut Realm, iterable: JsValue) -> JsResult<JsValue> {
     let record = combinator_record(realm, &result, 0);
     for item in items {
         let promise = resolve_value(realm, item)?;
-        let element: NativeData = Rc::new(RefCell::new(vec![JsValue::Object(record.clone())]));
+        let element: NativeData = Gc::new(GcRefCell::new(vec![JsValue::Object(record.clone())]));
         let on_fulfilled = realm.native_function_data("", 1, element.clone(), race_resolve_element);
         let on_rejected = realm.native_function_data("", 1, element, race_reject_element);
         attach(realm, &promise, Some(on_fulfilled), Some(on_rejected), None)?;

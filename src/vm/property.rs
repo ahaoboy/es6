@@ -4,8 +4,6 @@
 //! `JS_GetPropertyInternal` (quickjs.c:9110) and `JS_SetPropertyInternal`
 //! (quickjs.c:10818); the caches mirror `JSPropCacheEntry`.
 
-use std::rc::Rc;
-
 use super::ValueStack;
 use super::call::call_value;
 use super::ops::pop;
@@ -115,26 +113,17 @@ pub(crate) fn cached_get_const(
             && !entry.own
             && (entry.object_shape == shape || entry.poly_proto(shape))
             && entry.prototype_generation == crate::object::prototype_generation()
-            && data
-                .prototype
-                .as_ref()
-                .map(|proto| Rc::as_ptr(proto) as usize)
-                == entry.receiver_proto
+            && data.prototype.as_ref().map(|proto| {
+                proto.as_ref() as *const boa_gc::GcRefCell<crate::object::ObjectData> as usize
+            }) == entry.receiver_proto
         {
-            entry
-                .holder
-                .as_ref()
-                .and_then(std::rc::Weak::upgrade)
-                .and_then(|holder| {
-                    let holder_data = holder.borrow();
-                    if holder_data.shape_id() == entry.holder_shape {
-                        holder_data.props.get(entry.index as usize).map(|property| {
-                            (property.value.clone(), property.get.as_deref().cloned())
-                        })
-                    } else {
-                        None
-                    }
-                })
+            read_proto_holder(
+                &data,
+                entry.holder_depth,
+                entry.holder_shape,
+                entry.index,
+                None,
+            )
         } else if entry.valid && entry.own && entry.object_shape == shape {
             data.props
                 .get(entry.index as usize)
@@ -221,28 +210,17 @@ pub(crate) fn cached_get_property(
                     None
                 }
             } else if entry.prototype_generation == crate::object::prototype_generation()
-                && data
-                    .prototype
-                    .as_ref()
-                    .map(|proto| Rc::as_ptr(proto) as usize)
-                    == entry.receiver_proto
+                && data.prototype.as_ref().map(|proto| {
+                    proto.as_ref() as *const boa_gc::GcRefCell<crate::object::ObjectData> as usize
+                }) == entry.receiver_proto
             {
-                entry
-                    .holder
-                    .as_ref()
-                    .and_then(std::rc::Weak::upgrade)
-                    .and_then(|holder| {
-                        let holder_data = holder.borrow();
-                        if holder_data.shape_id() == entry.holder_shape
-                            && holder_data.shape.keys.get(entry.index as usize) == Some(key)
-                        {
-                            holder_data.props.get(entry.index as usize).map(|property| {
-                                (property.value.clone(), property.get.as_deref().cloned())
-                            })
-                        } else {
-                            None
-                        }
-                    })
+                read_proto_holder(
+                    &data,
+                    entry.holder_depth,
+                    entry.holder_shape,
+                    entry.index,
+                    Some(key),
+                )
             } else {
                 None
             };
@@ -264,14 +242,13 @@ pub(crate) fn cached_get_property(
         if let Some(index) = receiver.lookup(key) {
             let mut entry = cache.borrow_mut();
             entry.object_shape = receiver.shape_id();
-            entry.holder = None;
-            entry.receiver_proto = None;
             entry.index = index;
             entry.own = true;
             entry.valid = true;
             entry.remember_own(receiver.shape_id(), index);
         } else {
             let mut current = receiver.prototype.clone();
+            let mut depth = 0;
             while let Some(holder) = current {
                 let (shape, index, next) = {
                     let data = holder.borrow();
@@ -281,12 +258,12 @@ pub(crate) fn cached_get_property(
                 if let Some(index) = index {
                     let mut entry = cache.borrow_mut();
                     entry.object_shape = receiver.shape_id();
-                    entry.holder = Some(Rc::downgrade(&holder));
                     entry.holder_shape = shape;
-                    entry.receiver_proto = receiver
-                        .prototype
-                        .as_ref()
-                        .map(|proto| Rc::as_ptr(proto) as usize);
+                    entry.holder_depth = depth;
+                    entry.receiver_proto = receiver.prototype.as_ref().map(|proto| {
+                        proto.as_ref() as *const boa_gc::GcRefCell<crate::object::ObjectData>
+                            as usize
+                    });
                     entry.prototype_generation = crate::object::prototype_generation();
                     entry.index = index;
                     entry.own = false;
@@ -295,6 +272,7 @@ pub(crate) fn cached_get_property(
                     break;
                 }
                 current = next;
+                depth += 1;
             }
         }
     }
@@ -378,8 +356,6 @@ pub(crate) fn cached_set_property(
         if let Some(index) = data.lookup(key) {
             let mut entry = cache.borrow_mut();
             entry.object_shape = data.shape_id();
-            entry.holder = None;
-            entry.receiver_proto = None;
             entry.index = index;
             entry.insert_shape = shape_before;
             entry.insert_target = (!had_own).then(|| data.shape.clone());
@@ -591,4 +567,37 @@ pub(crate) fn property_key_from_constant(
         Some(Constant::Number(value)) => Ok(PropKey::from(super::format_number(*value))),
         _ => Err(JsValue::string("InternalError: invalid property constant")),
     }
+}
+
+fn read_proto_holder(
+    receiver: &crate::object::ObjectData,
+    depth: u32,
+    holder_shape: u64,
+    index: u32,
+    key: Option<&crate::object::PropKey>,
+) -> Option<(JsValue, Option<JsValue>)> {
+    fn walk(
+        cell: &boa_gc::GcRefCell<crate::object::ObjectData>,
+        depth: u32,
+        holder_shape: u64,
+        index: u32,
+        key: Option<&crate::object::PropKey>,
+    ) -> Option<(JsValue, Option<JsValue>)> {
+        let data = cell.borrow();
+        if depth == 0 {
+            let key_matches =
+                key.is_none_or(|key| data.shape.keys.get(index as usize) == Some(key));
+            return (data.shape_id() == holder_shape && key_matches)
+                .then(|| {
+                    data.props
+                        .get(index as usize)
+                        .map(|property| (property.value.clone(), property.get.as_deref().cloned()))
+                })
+                .flatten();
+        }
+        let next = data.prototype.as_ref()?;
+        walk(next.as_ref(), depth - 1, holder_shape, index, key)
+    }
+    let first = receiver.prototype.as_ref()?;
+    walk(first.as_ref(), depth, holder_shape, index, key)
 }

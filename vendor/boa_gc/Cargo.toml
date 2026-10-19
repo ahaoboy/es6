@@ -1,0 +1,19 @@
+[package]
+name = "boa_gc"
+version = "0.22.0"
+edition = "2024"
+license = "Unlicense OR MIT"
+description = "Mark-sweep garbage collector adapted from Boa's boa_gc."
+repository = "https://github.com/boa-dev/boa"
+
+# Only the core collector is vendored. Optional trace integrations from the
+# upstream crate are declared but unused so the `cfg` gates remain meaningful.
+[features]
+thin-vec = []
+icu = []
+boa_string = []
+either = []
+arrayvec = []
+
+[dependencies]
+hashbrown = "0.17"

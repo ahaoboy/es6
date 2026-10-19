@@ -4,6 +4,7 @@
 //! (quickjs.c:10551).
 
 use super::*;
+use boa_gc::{Gc, GcRefCell};
 
 impl ObjectData {
     pub fn get_property(
@@ -281,7 +282,7 @@ impl ObjectData {
     }
 
     pub fn into_handle(self) -> Object {
-        Object::from_ref(Rc::new(RefCell::new(self)))
+        Object::from_ref(Gc::new(GcRefCell::new(self)))
     }
 
     pub fn set_proto(&mut self, proto: Option<ObjRef>) {

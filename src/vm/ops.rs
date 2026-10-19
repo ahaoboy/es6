@@ -4,6 +4,7 @@
 //! `JS_CallInternal` (quickjs.c:18051); the fused operands mirror QuickJS'
 //! short opcodes (`quickjs-opcode.h`).
 
+use boa_gc::{Gc, GcRefCell};
 use std::rc::Rc;
 
 use super::frame::{Frame, Handler, Step};
@@ -1555,7 +1556,7 @@ fn constant_value(
                 regex: Rc::new(regex),
             });
             let object = ObjectData::regexp(data, Some(realm.regexp_proto.clone()));
-            let object = Rc::new(std::cell::RefCell::new(object));
+            let object = Gc::new(GcRefCell::new(object));
             Ok(JsValue::Object(object))
         }
         None => Err(JsValue::string("InternalError: invalid constant")),

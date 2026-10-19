@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use boa_gc::{Gc, GcRefCell};
 use std::rc::Rc;
 
 use super::*;
@@ -79,7 +79,7 @@ pub(crate) fn make_regexp(realm: &mut Realm, source: &str, flags: &str) -> JsRes
         regex: Rc::new(regex),
     });
     let object = ObjectData::regexp(data, Some(realm.regexp_proto.clone()));
-    Ok(JsValue::Object(Rc::new(RefCell::new(object))))
+    Ok(JsValue::Object(Gc::new(GcRefCell::new(object))))
 }
 
 /// Sort flags into `dgimsuvy` order (ES2022 22.1.3.2.1).

@@ -5,7 +5,7 @@
 //! `construct_value` mirrors `JS_CallConstructorInternal` (quickjs.c:21078)
 //! with receiver allocation like `JS_NewObjectFromShape` (quickjs.c:6136).
 
-use std::cell::RefCell;
+use boa_gc::{Gc, GcRefCell};
 use std::rc::Rc;
 
 use super::ArgumentStack;
@@ -208,12 +208,14 @@ pub fn construct_value(
         }
     };
     if function.native.is_some() || function.native_data.is_some() {
-        let this = JsValue::Object(Rc::new(RefCell::new(ObjectData::ordinary(Some(prototype)))));
+        let this = JsValue::Object(Gc::new(GcRefCell::new(ObjectData::ordinary(Some(
+            prototype,
+        )))));
         let result = call_value(realm, callee.clone(), this.clone(), arguments)?;
         return Ok(if result.is_object() { result } else { this });
     }
     let this_object = ObjectData::ordinary(Some(prototype));
-    let this = JsValue::Object(Rc::new(RefCell::new(this_object)));
+    let this = JsValue::Object(Gc::new(GcRefCell::new(this_object)));
     // Base class fields initialize before the constructor body runs; derived
     // class fields initialize in the `super()` call (see `Op::SuperCall`).
     if !function.has_super {

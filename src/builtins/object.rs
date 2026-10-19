@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use boa_gc::{Gc, GcRefCell};
 use std::rc::Rc;
 
 use super::*;
@@ -134,7 +134,7 @@ fn is_prototype_of(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> 
     };
     let mut current = target.borrow().prototype.clone();
     while let Some(object) = current {
-        if Rc::ptr_eq(&object, &prototype.to_ref()) {
+        if Gc::ptr_eq(&object, &prototype.to_ref()) {
             return Ok(JsValue::Bool(true));
         }
         current = object.borrow().prototype.clone();
@@ -178,9 +178,9 @@ fn set_proto(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsResu
             if crate::object::would_create_cycle(&object.to_ref(), &proto) {
                 return Err(realm.type_error("Cyclic prototype chain"));
             }
-            object.to_ref().borrow_mut().prototype = Some(proto);
+            object.to_ref().borrow_mut().set_proto(Some(proto));
         }
-        JsValue::Null => object.to_ref().borrow_mut().prototype = None,
+        JsValue::Null => object.to_ref().borrow_mut().set_proto(None),
         _ => {
             return Err(realm.type_error("Object prototype may only be an Object or null"));
         }
@@ -279,7 +279,7 @@ fn create(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult
             return Err(realm.type_error("Object prototype may only be an Object or null"));
         }
     };
-    let object = Rc::new(RefCell::new(crate::object::ObjectData::ordinary(proto)));
+    let object = Gc::new(GcRefCell::new(crate::object::ObjectData::ordinary(proto)));
     let value = JsValue::Object(object);
     let properties = arg(arguments, 1);
     if properties.is_object() {
@@ -306,9 +306,9 @@ fn set_proto_of(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> Js
             if crate::object::would_create_cycle(&object.to_ref(), &prototype) {
                 return Err(realm.type_error("Cyclic prototype chain"));
             }
-            object.to_ref().borrow_mut().prototype = Some(prototype);
+            object.to_ref().borrow_mut().set_proto(Some(prototype));
         }
-        JsValue::Null => object.to_ref().borrow_mut().prototype = None,
+        JsValue::Null => object.to_ref().borrow_mut().set_proto(None),
         _ => return Err(realm.type_error("Object prototype may only be an Object or null")),
     }
     Ok(arg(arguments, 0))

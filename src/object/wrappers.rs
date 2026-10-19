@@ -2,6 +2,7 @@
 //! the rquickjs-style API surface over `ObjectData`.
 
 use super::*;
+use boa_gc::{Gc, GcRefCell};
 
 #[derive(Clone)]
 pub struct Object {
@@ -189,7 +190,7 @@ impl Function {
     }
 
     pub fn as_object(&self) -> Object {
-        Object::from_ref(Rc::new(RefCell::new(ObjectData::new_function(
+        Object::from_ref(Gc::new(GcRefCell::new(ObjectData::new_function(
             self.inner.clone(),
         ))))
     }
@@ -253,7 +254,7 @@ impl IntoIterator for Array {
 pub fn would_create_cycle(object: &ObjRef, prototype: &ObjRef) -> bool {
     let mut current = Some(prototype.clone());
     while let Some(candidate) = current {
-        if Rc::ptr_eq(&candidate, object) {
+        if Gc::ptr_eq(&candidate, object) {
             return true;
         }
         current = candidate.borrow().prototype.clone();

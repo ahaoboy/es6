@@ -2,6 +2,7 @@
 //! mirroring the split used by QuickJS' `JS_AddIntrinsic*` functions
 //! (`quickjs.c`, around the `JS_NewContextRaw` initialization table).
 
+use boa_gc::{Gc, GcRefCell};
 mod array;
 mod boolean;
 mod buffer;
@@ -25,7 +26,6 @@ mod string;
 mod symbol;
 mod weakmap;
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::object::{
@@ -284,7 +284,7 @@ pub(crate) fn bound_function(
         length,
         native: None,
         native_data: None,
-        data: Rc::new(RefCell::new(Vec::new())),
+        data: Gc::new(GcRefCell::new(Vec::new())),
         def: None,
         env: None,
         bound: Some(crate::object::BoundFunction {
@@ -295,7 +295,7 @@ pub(crate) fn bound_function(
         lexical_this: None,
         instance_init: None,
         has_super: false,
-        prototype: std::cell::RefCell::new(None),
+        prototype: GcRefCell::new(None),
     });
     JsValue::Object(realm.function_object(function))
 }

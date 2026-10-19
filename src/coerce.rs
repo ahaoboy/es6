@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use boa_gc::Gc;
 
 use crate::object::{ObjectKind, PropKey};
 use crate::runtime::Realm;
@@ -524,7 +524,7 @@ pub fn strict_equals(left: &JsValue, right: &JsValue) -> bool {
         (JsValue::Float(a), JsValue::Float(b)) => a == b,
         (JsValue::String(a), JsValue::String(b)) => a == b,
         (JsValue::Symbol(a), JsValue::Symbol(b)) => a == b,
-        (JsValue::Object(a), JsValue::Object(b)) => Rc::ptr_eq(a, b),
+        (JsValue::Object(a), JsValue::Object(b)) => Gc::ptr_eq(a, b),
         _ => false,
     }
 }
@@ -634,7 +634,7 @@ pub(crate) fn instance_of(
         _ => return Ok(false),
     };
     while let Some(object) = current {
-        if Rc::ptr_eq(&object, &prototype) {
+        if Gc::ptr_eq(&object, &prototype) {
             return Ok(true);
         }
         current = object.borrow().prototype.clone();

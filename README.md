@@ -43,11 +43,11 @@ exports namespace.
 
 ## Garbage collection
 
-Objects are reference counted, and a trial-deletion cycle collector mirrors
-QuickJS' `JS_RunGC` phases. The collector registry holds weak handles, so
-acyclic garbage is freed immediately; only cycles survive to a cycle scan.
-Collections run automatically as the heap grows during execution, keeping
-long-running programs bounded, and `Runtime::run_gc` forces one.
+Objects, environments and native data cells are managed by the vendored
+Boa mark-sweep collector. Handles use `Gc<T>` root accounting; cycles are
+collected by tracing, and `WeakMap`/`WeakSet` entries use ephemeron
+semantics. Allocation triggers collection once the heap crosses an adaptive
+byte threshold, and `Runtime::run_gc` forces a full collection.
 
 ## Module layout
 
@@ -62,7 +62,7 @@ src/
   vm/         activation records, dispatch loop, call machinery, property
               paths with inline caches, iteration protocol, generators
   object/     object model, exotic payloads, public handles
-  gc.rs       trial-deletion cycle collector
+  gc.rs       Boa collector integration (collector vendored in vendor/boa_gc)
   promise.rs  promise reactions, combinator records, job queue
   runtime.rs  Realm, Runtime and Context
   builtins/   one module per constructor/prototype pair

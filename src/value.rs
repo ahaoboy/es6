@@ -1,6 +1,7 @@
-use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
+
+use boa_gc::{Finalize, Gc, GcRefCell};
 
 use crate::bytecode::FunctionDef;
 use crate::object::{Function, ObjRef, Object, ObjectData};
@@ -11,7 +12,7 @@ use crate::string::JsString;
 /// loop straightforward.
 pub type JsResult<T> = std::result::Result<T, JsValue>;
 
-pub type EnvRef = Rc<Env>;
+pub type EnvRef = Gc<Env>;
 
 /// Lexical environment frame. QuickJS represents the same chain with
 /// `JSVarRef`/`JSFunctionBytecode.closure_var` and resolves `(depth, slot)`
@@ -20,20 +21,18 @@ pub struct Env {
     /// Captured slots stay inline for the common small closure, avoiding a
     /// heap buffer per call (`JSVarRef` chains in QuickJS are similarly
     /// compact).
-    pub slots: RefCell<smallvec::SmallVec<[JsValue; 4]>>,
+    pub slots: GcRefCell<smallvec::SmallVec<[JsValue; 4]>>,
     pub parent: Option<EnvRef>,
 }
 
 impl Env {
     pub fn new(size: usize, parent: Option<EnvRef>) -> EnvRef {
-        // Environments register with the GC like QuickJS'
-        // `JS_GC_OBJ_TYPE_VAR_REF` (quickjs.c:450).
         let mut slots = smallvec::SmallVec::new();
         slots.resize(size, JsValue::Undefined);
-        crate::gc::register_env(Rc::new(Self {
-            slots: RefCell::new(slots),
+        Gc::new(Self {
+            slots: GcRefCell::new(slots),
             parent,
-        }))
+        })
     }
 
     #[inline(always)]
@@ -203,7 +202,7 @@ impl JsValue {
     }
 
     pub fn from_function(function: Rc<crate::object::JsFunction>) -> Self {
-        Self::Object(Rc::new(RefCell::new(ObjectData::new_function(function))))
+        Self::Object(Gc::new(GcRefCell::new(ObjectData::new_function(function))))
     }
 
     pub fn from_compiled(def: Rc<FunctionDef>, env: EnvRef) -> Self {
@@ -212,14 +211,14 @@ impl JsValue {
             length: def.length,
             native: None,
             native_data: None,
-            data: Rc::new(RefCell::new(Vec::new())),
+            data: Gc::new(GcRefCell::new(Vec::new())),
             def: Some(def),
             env: Some(env),
             bound: None,
             lexical_this: None,
             instance_init: None,
             has_super: false,
-            prototype: std::cell::RefCell::new(None),
+            prototype: GcRefCell::new(None),
         };
         Self::from_function(Rc::new(function))
     }
@@ -289,7 +288,7 @@ impl IntoJs for Object {
 
 impl IntoJs for Function {
     fn into_js(self) -> JsValue {
-        JsValue::Object(Rc::new(RefCell::new(ObjectData::new_function(
+        JsValue::Object(Gc::new(GcRefCell::new(ObjectData::new_function(
             self.to_ref(),
         ))))
     }
@@ -304,7 +303,7 @@ impl<T: IntoJs> IntoJs for Option<T> {
 impl<T: IntoJs> IntoJs for Vec<T> {
     fn into_js(self) -> JsValue {
         let objects = self.into_iter().map(IntoJs::into_js).collect();
-        JsValue::Object(Rc::new(RefCell::new(ObjectData::new_array(objects))))
+        JsValue::Object(Gc::new(GcRefCell::new(ObjectData::new_array(objects))))
     }
 }
 
@@ -355,4 +354,32 @@ impl FromJs for Function {
     fn from_js(value: JsValue) -> Option<Self> {
         value.as_function()
     }
+}
+
+impl Finalize for Env {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for Env {
+    boa_gc::custom_trace!(this, mark, {
+        if let Some(parent) = &this.parent {
+            mark(parent);
+        }
+        for value in this
+            .slots
+            .try_borrow()
+            .iter()
+            .flat_map(|slots| slots.iter())
+        {
+            mark(value);
+        }
+    });
+}
+
+impl Finalize for JsValue {}
+#[allow(unsafe_code)]
+unsafe impl boa_gc::Trace for JsValue {
+    boa_gc::custom_trace!(this, mark, {
+        if let JsValue::Object(object) = this {
+            mark(object);
+        }
+    });
 }

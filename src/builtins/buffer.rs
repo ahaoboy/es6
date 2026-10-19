@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use boa_gc::Gc;
 
 use super::*;
 use crate::object::{
@@ -506,7 +506,7 @@ fn kind_from_constructor(realm: &mut Realm, this: &JsValue) -> JsResult<TypedArr
         return Err(realm.type_error("Invalid typed array constructor"));
     };
     for (kind, candidate) in &realm.typed_array_protos {
-        if Rc::ptr_eq(candidate, &prototype) {
+        if Gc::ptr_eq(candidate, &prototype) {
             return Ok(*kind);
         }
     }

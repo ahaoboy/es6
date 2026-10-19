@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use boa_gc::Gc;
 
 use super::*;
 use crate::ast::StmtKind;
@@ -132,7 +132,7 @@ fn has_instance(realm: &mut Realm, this: &JsValue, arguments: &[JsValue]) -> JsR
         _ => return Ok(JsValue::Bool(false)),
     };
     while let Some(object) = current {
-        if Rc::ptr_eq(&object, &prototype) {
+        if Gc::ptr_eq(&object, &prototype) {
             return Ok(JsValue::Bool(true));
         }
         current = object.borrow().prototype.clone();

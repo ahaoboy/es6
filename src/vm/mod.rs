@@ -5,6 +5,7 @@
 //! (quickjs.c:427) and whose dispatch loop is the counterpart of
 //! `JS_CallInternal` (quickjs.c:18051).
 
+use boa_gc::{Gc, GcRefCell};
 mod call;
 pub(crate) mod error;
 mod frame;
@@ -166,17 +167,7 @@ fn run_loop(realm: &mut Realm, mut frame: Box<Frame>) -> JsResult<RunOutcome> {
     // Program counter kept in a register; synchronized with `frame.pc` when
     // an opcode suspends, unwinds or returns.
     let mut pc = frame.pc;
-    // Check the allocation threshold from the dispatch loop, like QuickJS
-    // calling `js_trigger_gc` from its allocation helpers. The registry keeps
-    // every entity alive, so without this a long-running script would only
-    // collect once when `eval` returns.
-    let mut gc_countdown = 4096u32;
     loop {
-        gc_countdown -= 1;
-        if gc_countdown == 0 {
-            gc_countdown = 4096;
-            crate::gc::maybe_collect();
-        }
         if pc >= code.len() {
             frame.pc = pc;
             recycle_frame(realm, frame);
@@ -292,7 +283,7 @@ fn run_thenable_job(realm: &mut Realm, promise: ObjRef, thenable: JsValue, then:
             crate::object::Property::data(JsValue::Bool(false)),
         );
     }
-    let data: NativeData = Rc::new(RefCell::new(vec![JsValue::Object(record)]));
+    let data: NativeData = Gc::new(GcRefCell::new(vec![JsValue::Object(record)]));
     let resolve_function =
         realm.native_function_data("", 1, data.clone(), thenable_resolve_element);
     let reject_function = realm.native_function_data("", 1, data.clone(), thenable_reject_element);
