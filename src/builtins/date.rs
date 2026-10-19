@@ -576,7 +576,17 @@ fn parse_date_only(value: &str) -> Option<f64> {
 }
 
 fn parse_time(value: &str) -> Option<f64> {
-    let value = value.trim_end_matches('Z').trim_end_matches('z');
+    let (value, offset_minutes) = if let Some(rest) = value.strip_suffix(['Z', 'z']) {
+        (rest, 0.0)
+    } else if let Some(position) = value.rfind(['+', '-']) {
+        if position == 0 {
+            return None;
+        }
+        let (clock, zone) = value.split_at(position);
+        (clock, parse_offset(zone)?)
+    } else {
+        (value, 0.0)
+    };
     let mut parts = value.split(':');
     let hours: f64 = parts.next()?.parse().ok()?;
     let minutes: f64 = parts.next()?.parse().ok()?;
@@ -608,7 +618,35 @@ fn parse_time(value: &str) -> Option<f64> {
     {
         return None;
     }
-    Some((hours * 3_600.0 + minutes * 60.0 + seconds) * 1000.0 + milliseconds)
+    Some(
+        (hours * 3_600.0 + minutes * 60.0 + seconds) * 1000.0 + milliseconds
+            - offset_minutes * 60_000.0,
+    )
+}
+
+/// Parse an ISO-8601/RFC 3339 numeric zone: `+HH:MM`, `-HHMM`, or `+HH`.
+/// The returned value is the offset in minutes east of UTC.
+fn parse_offset(value: &str) -> Option<f64> {
+    let sign = match value.as_bytes().first()? {
+        b'+' => 1.0,
+        b'-' => -1.0,
+        _ => return None,
+    };
+    let body = &value[1..];
+    let (hours, minutes) = if let Some((hours, minutes)) = body.split_once(':') {
+        (hours.parse::<f64>().ok()?, minutes.parse::<f64>().ok()?)
+    } else if body.len() == 4 {
+        (
+            body.get(..2)?.parse::<f64>().ok()?,
+            body.get(2..)?.parse::<f64>().ok()?,
+        )
+    } else {
+        (body.parse::<f64>().ok()?, 0.0)
+    };
+    if !(0.0..=23.0).contains(&hours) || !(0.0..=59.0).contains(&minutes) {
+        return None;
+    }
+    Some(sign * (hours * 60.0 + minutes))
 }
 
 fn utc(realm: &mut Realm, _this: &JsValue, arguments: &[JsValue]) -> JsResult<JsValue> {
