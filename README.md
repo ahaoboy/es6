@@ -28,6 +28,12 @@ The `intl` feature adds `Intl.DateTimeFormat` and
 It uses the system time zone and DST rules; the regular Date arithmetic remains
 the specification-defined UTC implementation.
 
+Release builds use fat LTO, one codegen unit and a PGO profile
+(`pgo.profdata`) on Windows. The profile path is in `.cargo/config.toml`; update
+it if the checkout moves. Regenerate the profile after substantial execution
+changes with an instrumented build (`-Cprofile-generate=...`) followed by
+`llvm-profdata merge`.
+
 CLI options:
 
 ```text
