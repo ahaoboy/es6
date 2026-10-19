@@ -36,11 +36,7 @@ pub const GIT_COMMIT_HASH: &str = git_version::git_version!(
 );
 
 /// Combined version string: `<cargo-version>+<commit>`.
-pub const VERSION_STRING: &str = const_str::concat!(VERSION, "+", GIT_COMMIT_HASH);
-
-/// Human-readable product string, e.g. `es6 0.1.0+7e7939305a98`.
-pub const VERSION_INFO: &str =
-    const_str::concat!(env!("CARGO_PKG_NAME"), " ", VERSION, "+", GIT_COMMIT_HASH);
+pub const VERSION_STRING: &str = const_str::concat!(VERSION, " ", GIT_COMMIT_HASH);
 
 mod api;
 pub mod ast;
