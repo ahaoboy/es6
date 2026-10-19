@@ -13,10 +13,7 @@ impl Compiler {
             ExprKind::Literal(literal) => self.compile_literal(literal),
             ExprKind::Ident(name) => {
                 if let Some(reference) = self.resolve(name) {
-                    self.emit(Op::GetVar {
-                        depth: reference.depth,
-                        slot: reference.slot,
-                    });
+                    self.emit_get(reference.depth, reference.slot);
                 } else {
                     self.emit_get_global(name);
                 }
@@ -63,6 +60,33 @@ impl Compiler {
                             depth: left_ref.depth,
                             slot: left_ref.slot,
                             value: index,
+                        });
+                        return Ok(());
+                    }
+                }
+                if let Some(kind) = binary_kind(*op)
+                    && let ExprKind::Ident(left_name) = &left.kind
+                    && let Some(left_ref) = self.resolve(left_name)
+                {
+                    if let ExprKind::Ident(right_name) = &right.kind
+                        && let Some(right_ref) = self.resolve(right_name)
+                    {
+                        self.emit(Op::BinaryVars {
+                            op: kind,
+                            left_depth: left_ref.depth,
+                            left_slot: left_ref.slot,
+                            right_depth: right_ref.depth,
+                            right_slot: right_ref.slot,
+                        });
+                        return Ok(());
+                    }
+                    if let ExprKind::Literal(Literal::Number(value)) = &right.kind {
+                        let value = self.number_constant(*value);
+                        self.emit(Op::BinaryVarConst {
+                            op: kind,
+                            depth: left_ref.depth,
+                            slot: left_ref.slot,
+                            value,
                         });
                         return Ok(());
                     }
@@ -302,27 +326,15 @@ impl Compiler {
                 // return value becomes the expression value.
                 self.compile_expr(iterable)?;
                 let (iter_depth, iter_slot) = self.alloc_temp();
-                self.emit(Op::SetVar {
-                    depth: iter_depth,
-                    slot: iter_slot,
-                });
+                self.emit_set(iter_depth, iter_slot);
                 let (sent_depth, sent_slot) = self.alloc_temp();
                 self.emit(Op::Undefined);
-                self.emit(Op::SetVar {
-                    depth: sent_depth,
-                    slot: sent_slot,
-                });
+                self.emit_set(sent_depth, sent_slot);
                 let start = self.position();
-                self.emit(Op::GetVar {
-                    depth: iter_depth,
-                    slot: iter_slot,
-                });
+                self.emit_get(iter_depth, iter_slot);
                 self.emit(Op::Dup);
                 self.emit_get_prop_const("next");
-                self.emit(Op::GetVar {
-                    depth: sent_depth,
-                    slot: sent_slot,
-                });
+                self.emit_get(sent_depth, sent_slot);
                 self.emit(Op::CallMethod(1));
                 self.emit(Op::Dup);
                 self.emit_get_prop_const("done");
@@ -332,10 +344,7 @@ impl Compiler {
                 let resume = self.position();
                 self.patch_jump(yield_jump, resume);
                 // The resumed sent value is on the stack: store it back.
-                self.emit(Op::SetVar {
-                    depth: sent_depth,
-                    slot: sent_slot,
-                });
+                self.emit_set(sent_depth, sent_slot);
                 self.emit(Op::Jump(start as u32));
                 let done = self.position();
                 self.patch_jump(done_jump, done);
@@ -450,10 +459,7 @@ impl Compiler {
                     self.emit(Op::Dup);
                     self.compile_key_name(&PropertyName::Ident(name.clone()))?;
                     if let Some(reference) = self.resolve(name) {
-                        self.emit(Op::GetVar {
-                            depth: reference.depth,
-                            slot: reference.slot,
-                        });
+                        self.emit_get(reference.depth, reference.slot);
                     } else {
                         self.emit_get_global(name);
                     }
@@ -1339,6 +1345,32 @@ impl Compiler {
                     });
                     return Ok(());
                 }
+                if let Some(kind) = assign_binary_kind(op)
+                    && let Some(dst) = reference
+                {
+                    if let ExprKind::Ident(source) = &value.kind
+                        && let Some(src) = self.resolve(source)
+                    {
+                        self.emit(Op::BinaryVar {
+                            op: kind,
+                            dst_depth: dst.depth,
+                            dst_slot: dst.slot,
+                            src_depth: src.depth,
+                            src_slot: src.slot,
+                        });
+                        return Ok(());
+                    }
+                    if let ExprKind::Literal(Literal::Number(number)) = &value.kind {
+                        let value = self.number_constant(*number);
+                        self.emit(Op::BinaryVarConstStore {
+                            op: kind,
+                            depth: dst.depth,
+                            slot: dst.slot,
+                            value,
+                        });
+                        return Ok(());
+                    }
+                }
                 self.emit_ident_load(name);
                 self.compile_expr(value)?;
                 self.emit(assign_binary_op(op));
@@ -1454,28 +1486,22 @@ impl Compiler {
     ) -> Result<(), ParseError> {
         self.compile_expr(object)?;
         let (object_depth, object_slot) = self.alloc_temp();
-        self.emit(Op::SetVar {
-            depth: object_depth,
-            slot: object_slot,
-        });
+        self.emit_set(object_depth, object_slot);
         let key = if matches!(property, MemberProperty::Computed(_)) {
             self.compile_member_key(property)?;
             let (depth, slot) = self.alloc_temp();
-            self.emit(Op::SetVar { depth, slot });
+            self.emit_set(depth, slot);
             Some((depth, slot))
         } else {
             None
         };
 
-        self.emit(Op::GetVar {
-            depth: object_depth,
-            slot: object_slot,
-        });
+        self.emit_get(object_depth, object_slot);
         match property {
             MemberProperty::Ident(name) => self.emit_get_prop_const(name),
             MemberProperty::Computed(_) => {
                 let (depth, slot) = key.expect("computed member has a key");
-                self.emit(Op::GetVar { depth, slot });
+                self.emit_get(depth, slot);
                 self.emit(Op::GetProp);
             }
         }
@@ -1518,21 +1544,12 @@ impl Compiler {
     ) -> Result<(), ParseError> {
         self.compile_expr(value)?;
         let (value_depth, value_slot) = self.alloc_temp();
-        self.emit(Op::SetVar {
-            depth: value_depth,
-            slot: value_slot,
-        });
-        self.emit(Op::GetVar {
-            depth: object_depth,
-            slot: object_slot,
-        });
+        self.emit_set(value_depth, value_slot);
+        self.emit_get(object_depth, object_slot);
         if let Some((depth, slot)) = key {
-            self.emit(Op::GetVar { depth, slot });
+            self.emit_get(depth, slot);
         }
-        self.emit(Op::GetVar {
-            depth: value_depth,
-            slot: value_slot,
-        });
+        self.emit_get(value_depth, value_slot);
         match property {
             MemberProperty::Ident(name) => self.emit_set_prop_const(name, false),
             MemberProperty::Computed(_) => self.emit(Op::SetProp),
@@ -1552,14 +1569,14 @@ impl Compiler {
                 object, property, ..
             } => {
                 let (depth, slot) = self.alloc_temp();
-                self.emit(Op::SetVar { depth, slot });
+                self.emit_set(depth, slot);
                 self.compile_expr(object)?;
                 if let MemberProperty::Ident(name) = property {
-                    self.emit(Op::GetVar { depth, slot });
+                    self.emit_get(depth, slot);
                     self.emit_set_prop_const(name, false);
                 } else {
                     self.compile_member_key(property)?;
-                    self.emit(Op::GetVar { depth, slot });
+                    self.emit_get(depth, slot);
                     self.emit(Op::SetProp);
                 }
                 self.emit(Op::Pop);
@@ -1617,6 +1634,39 @@ impl Compiler {
                 }
                 Ok(false)
             }
+            ExprKind::Assign { op, target, value } => {
+                let ExprKind::Ident(dst) = &target.kind else {
+                    return Ok(false);
+                };
+                if let Some(kind) = assign_binary_kind(*op)
+                    && let Some(dst) = self.resolve(dst)
+                {
+                    if let ExprKind::Ident(src) = &value.kind
+                        && let Some(src) = self.resolve(src)
+                    {
+                        self.emit(Op::BinaryVarDiscard {
+                            op: kind,
+                            dst_depth: dst.depth,
+                            dst_slot: dst.slot,
+                            src_depth: src.depth,
+                            src_slot: src.slot,
+                        });
+                        return Ok(true);
+                    }
+                    if let ExprKind::Literal(Literal::Number(number)) = &value.kind {
+                        let value = self.number_constant(*number);
+                        self.emit(Op::BinaryVarConstStore {
+                            op: kind,
+                            depth: dst.depth,
+                            slot: dst.slot,
+                            value,
+                        });
+                        self.emit(Op::Pop);
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
             ExprKind::Update { op, argument, .. } => {
                 let ExprKind::Ident(name) = &argument.kind else {
                     return Ok(false);
@@ -1661,12 +1711,19 @@ impl Compiler {
         }
     }
 
+    /// Emit a resolved local load, specializing depth-zero slots to the
+    /// compact opcode used by the hot dispatch path.
+    pub(super) fn emit_get(&mut self, depth: u16, slot: u16) {
+        self.emit(Op::GetVar { depth, slot });
+    }
+
+    pub(super) fn emit_set(&mut self, depth: u16, slot: u16) {
+        self.emit(Op::SetVar { depth, slot });
+    }
+
     pub(super) fn emit_ident_load(&mut self, name: &str) {
         if let Some(reference) = self.resolve(name) {
-            self.emit(Op::GetVar {
-                depth: reference.depth,
-                slot: reference.slot,
-            });
+            self.emit_get(reference.depth, reference.slot);
         } else {
             self.emit_get_global(name);
         }
@@ -1674,10 +1731,7 @@ impl Compiler {
 
     pub(super) fn store_ident(&mut self, name: &str, mode: BindingMode) {
         if let Some(reference) = self.resolve(name) {
-            self.emit(Op::SetVar {
-                depth: reference.depth,
-                slot: reference.slot,
-            });
+            self.emit_set(reference.depth, reference.slot);
         } else {
             let _ = mode;
             let name = self.string_constant(name);

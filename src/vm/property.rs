@@ -90,11 +90,45 @@ pub fn get_value_property(realm: &mut Realm, value: &JsValue, key: &PropKey) -> 
     }
 }
 
+/// Inlined own-property hit for constant-key reads. Prototype lookups and
+/// cache repairs stay in [`cached_get_const_slow`], mirroring QuickJS' fast
+/// `JS_GetPropertyInternal` path for an own data property.
+#[inline(always)]
+pub(crate) fn cached_get_const(
+    realm: &mut Realm,
+    object: &JsValue,
+    definition: &crate::bytecode::FunctionDef,
+    index: u32,
+    cache: &std::cell::RefCell<PropCache>,
+) -> JsResult<JsValue> {
+    if let JsValue::Object(object_ref) = object {
+        {
+            let data = object_ref.borrow();
+            let entry = cache.borrow();
+            let shape = data.shape_id();
+            let slot = entry.poly_own(shape).or_else(|| {
+                (entry.valid && entry.own && entry.object_shape == shape).then_some(entry.index)
+            });
+            if let Some(slot) = slot
+                && let Some(property) = data.props.get(slot as usize)
+            {
+                if let Some(getter) = property.get.as_deref().cloned() {
+                    drop(entry);
+                    drop(data);
+                    return call_value(realm, getter, object.clone(), &[]);
+                }
+                return Ok(property.value.clone());
+            }
+        }
+    }
+    cached_get_const_slow(realm, object, definition, index, cache)
+}
+
 /// Constant-key get with a single cache borrow: the site key lives in the
 /// cache, so a hit never rebuilds or clones it. QuickJS keeps the same
 /// pre-interned atom plus property offset in JSPropCacheEntry.
-#[inline]
-pub(crate) fn cached_get_const(
+#[inline(never)]
+fn cached_get_const_slow(
     realm: &mut Realm,
     object: &JsValue,
     definition: &crate::bytecode::FunctionDef,
@@ -145,9 +179,50 @@ pub(crate) fn cached_get_const(
     cached_get_property(realm, object, &key, cache)
 }
 
-/// Constant-key set with the same single-borrow fast path.
-#[inline]
+/// Inlined own-property hit for constant-key stores. Structural updates and
+/// accessor calls stay out of line.
+#[inline(always)]
 pub(crate) fn cached_set_const(
+    realm: &mut Realm,
+    object: &JsValue,
+    definition: &crate::bytecode::FunctionDef,
+    index: u32,
+    value: &JsValue,
+    cache: &std::cell::RefCell<PropCache>,
+) -> JsResult<()> {
+    if let JsValue::Object(object_ref) = object {
+        let mut setter = None;
+        {
+            let mut data = object_ref.borrow_mut();
+            let entry = cache.borrow();
+            let shape = data.shape_id();
+            let slot = entry.poly_own(shape).or_else(|| {
+                (entry.valid && entry.own && entry.object_shape == shape).then_some(entry.index)
+            });
+            if let Some(slot) = slot
+                && let Some(property) = data.props.get_mut(slot as usize)
+            {
+                if property.is_accessor() {
+                    setter = property.set.as_deref().cloned();
+                } else {
+                    if property.writable {
+                        property.value = value.clone();
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(setter) = setter {
+            call_value(realm, setter, object.clone(), std::slice::from_ref(value))?;
+            return Ok(());
+        }
+    }
+    cached_set_const_slow(realm, object, definition, index, value, cache)
+}
+
+/// Constant-key set with the same single-borrow fast path.
+#[inline(never)]
+fn cached_set_const_slow(
     realm: &mut Realm,
     object: &JsValue,
     definition: &crate::bytecode::FunctionDef,
@@ -372,7 +447,7 @@ pub(crate) fn cached_set_property(
 
 /// Element access with the integer fast path used by `obj[index]`, like
 /// `js_get_fast_array_element` (quickjs.c:9969).
-#[inline]
+#[inline(always)]
 pub(crate) fn get_element_value(
     realm: &mut Realm,
     object: &JsValue,
@@ -392,7 +467,7 @@ pub(crate) fn get_element_value(
 }
 
 /// Indexed write fast path, like `JS_SetPropertyValue` (quickjs.c:10830).
-#[inline]
+#[inline(always)]
 pub(crate) fn set_element_value(
     realm: &mut Realm,
     object: &JsValue,
@@ -496,6 +571,7 @@ pub(crate) fn display_key(key: &PropKey) -> String {
 ///
 /// `None` still means "not defined", so callers can raise `ReferenceError`;
 /// undefined values are cached like any other data property.
+#[inline(always)]
 pub(crate) fn cached_global_get(
     realm: &mut Realm,
     definition: &FunctionDef,
@@ -516,6 +592,16 @@ pub(crate) fn cached_global_get(
             return Ok(Some(property.value.clone()));
         }
     }
+    cached_global_get_slow(realm, definition, name_index, cache)
+}
+
+#[inline(never)]
+fn cached_global_get_slow(
+    realm: &mut Realm,
+    definition: &FunctionDef,
+    name_index: u32,
+    cache: &std::cell::RefCell<PropCache>,
+) -> JsResult<Option<JsValue>> {
     let name = super::constant_string(definition, name_index);
     let value = global_get(realm, &name)?;
     if value.is_some() {

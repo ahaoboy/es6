@@ -15,6 +15,7 @@ pub const MAX_ARRAY_INDEX: u64 = 4_294_967_294;
 /// arrays to slow arrays in `expand_fast_array` (quickjs.c:10452).
 pub(crate) const DENSE_LIMIT: usize = 1 << 20;
 
+#[inline(always)]
 pub fn to_boolean(value: &JsValue) -> bool {
     match value {
         JsValue::Undefined | JsValue::Null => false,
@@ -513,6 +514,7 @@ pub fn same_value_zero(left: &JsValue, right: &JsValue) -> bool {
     )
 }
 
+#[inline(always)]
 pub fn strict_equals(left: &JsValue, right: &JsValue) -> bool {
     match (left, right) {
         (JsValue::Undefined, JsValue::Undefined) | (JsValue::Null, JsValue::Null) => true,

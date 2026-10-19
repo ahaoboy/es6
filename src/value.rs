@@ -66,7 +66,7 @@ impl Env {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub enum JsValue {
     #[default]
     Undefined,
@@ -77,6 +77,25 @@ pub enum JsValue {
     String(JsString),
     Symbol(u32),
     Object(ObjRef),
+}
+
+impl Clone for JsValue {
+    /// Keep the tag check inline at every operand-stack and cache copy.
+    /// The derived implementation was emitted as an out-of-line function and
+    /// showed up as one of the hottest VM helpers in the profile.
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        match self {
+            Self::Undefined => Self::Undefined,
+            Self::Null => Self::Null,
+            Self::Bool(value) => Self::Bool(*value),
+            Self::Int(value) => Self::Int(*value),
+            Self::Float(value) => Self::Float(*value),
+            Self::String(value) => Self::String(value.clone()),
+            Self::Symbol(value) => Self::Symbol(*value),
+            Self::Object(value) => Self::Object(value.clone()),
+        }
+    }
 }
 
 impl fmt::Debug for JsValue {

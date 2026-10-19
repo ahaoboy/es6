@@ -17,8 +17,6 @@ mod property;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use smallvec::SmallVec;
-
 use crate::bytecode::{Constant, FunctionDef};
 use crate::object::ObjRef;
 use crate::runtime::Realm;
@@ -31,6 +29,11 @@ pub(crate) use frame::{RunOutcome, Step};
 pub use iter::iterable_items;
 pub use property::{get_value_property, set_value_property};
 
+#[cfg(feature = "op_stats")]
+pub fn dump_op_stats() {
+    ops::dump_op_stats();
+}
+
 pub use crate::coerce::{
     add_values, format_number, loose_equals, same_value, same_value_zero, strict_equals,
     to_boolean, to_int32, to_number, to_numeric, to_primitive, to_property_key, to_string,
@@ -40,8 +43,8 @@ pub use crate::coerce::{
 /// Operand stack. Inline capacity covers typical expression depths, so most
 /// `push`/`pop` pairs never touch the heap (the QuickJS equivalent lives in
 /// the `JS_CallInternal` alloca, quickjs.c:18051).
-pub(crate) type ValueStack = SmallVec<[JsValue; 32]>;
-pub(crate) type ArgumentStack = SmallVec<[JsValue; 4]>;
+pub(crate) type ValueStack = Vec<JsValue>;
+pub(crate) type ArgumentStack = Vec<JsValue>;
 
 /// A queued job. QuickJS stores the same entries in `JSContext.job_list` and
 /// dispatches them in `JS_ExecutePendingJob` (quickjs.c:2525).
@@ -175,6 +178,8 @@ fn run_loop(realm: &mut Realm, mut frame: Box<Frame>) -> JsResult<RunOutcome> {
         }
         let op = code[pc];
         pc += 1;
+        #[cfg(feature = "op_stats")]
+        ops::record_op(&op);
         let step = ops::execute_op(realm, &mut frame, &mut pc, op);
         match step {
             Ok(Step::Continue) => {}

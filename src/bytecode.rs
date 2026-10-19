@@ -113,6 +113,25 @@ impl FunctionDef {
     }
 }
 
+/// Arithmetic and bitwise operations shared by the generic local-operand
+/// bytecodes. Keeping the small enum in the operand instead of adding a
+/// separate opcode per operator keeps the dispatch table compact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Exp,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    UShr,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareOp {
     Lt,
@@ -215,6 +234,11 @@ pub enum Op {
         depth: u16,
         slot: u16,
     },
+    /// Depth-zero, non-captured local access. The compiler resolves these
+    /// slots statically, so the runtime needs neither the environment tag nor
+    /// a scope-depth walk.
+    GetLocal(u16),
+    SetLocal(u16),
     GetGlobal {
         name: u32,
         cache: u32,
@@ -440,6 +464,45 @@ pub enum Op {
         value: i32,
         op: CompareOp,
         body: u32,
+    },
+    /// `local op local`, pushing the result. The operands are resolved
+    /// locals, so the two implicit loads do not cost separate dispatches.
+    BinaryVars {
+        op: BinaryKind,
+        left_depth: u16,
+        left_slot: u16,
+        right_depth: u16,
+        right_slot: u16,
+    },
+    /// `local op constant`, pushing the result.
+    BinaryVarConst {
+        op: BinaryKind,
+        depth: u16,
+        slot: u16,
+        value: u32,
+    },
+    /// `dst op= src` for two resolved locals; stores and pushes the result.
+    BinaryVar {
+        op: BinaryKind,
+        dst_depth: u16,
+        dst_slot: u16,
+        src_depth: u16,
+        src_slot: u16,
+    },
+    /// `dst op= constant`, stores and pushes the result.
+    BinaryVarConstStore {
+        op: BinaryKind,
+        depth: u16,
+        slot: u16,
+        value: u32,
+    },
+    /// Statement-position `dst op= src`, without the result push.
+    BinaryVarDiscard {
+        op: BinaryKind,
+        dst_depth: u16,
+        dst_slot: u16,
+        src_depth: u16,
+        src_slot: u16,
     },
     /// `local + constant`, pushing the result.
     AddVarConst {

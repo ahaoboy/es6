@@ -1145,12 +1145,12 @@ impl Compiler {
     ) -> Result<(), ParseError> {
         let (depth, slot) = self.alloc_temp();
         self.compile_expr(discriminant)?;
-        self.emit(Op::SetVar { depth, slot });
+        self.emit_set(depth, slot);
         let mut body_jumps = Vec::new();
         let mut default_index = None;
         for (index, case) in cases.iter().enumerate() {
             if let Some(test) = &case.test {
-                self.emit(Op::GetVar { depth, slot });
+                self.emit_get(depth, slot);
                 self.compile_expr(test)?;
                 self.emit(Op::Eq);
                 let skip = self.emit_jump(Op::JumpIfFalse(0));

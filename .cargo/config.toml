@@ -1,3 +1,0 @@
-# Release PGO profile. Update this absolute path if the checkout moves.
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "profile-use=C:/code/es6/pgo.profdata"]

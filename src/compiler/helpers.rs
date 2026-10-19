@@ -237,6 +237,45 @@ pub(super) fn comparison_op(op: BinaryOp) -> Option<CompareOp> {
     })
 }
 
+/// Map an AST binary operator to the compact operand used by the generic
+/// local-operand bytecodes. Comparisons and object operators keep their
+/// dedicated opcodes.
+pub(super) fn binary_kind(op: BinaryOp) -> Option<BinaryKind> {
+    match op {
+        BinaryOp::Add => Some(BinaryKind::Add),
+        BinaryOp::Sub => Some(BinaryKind::Sub),
+        BinaryOp::Mul => Some(BinaryKind::Mul),
+        BinaryOp::Div => Some(BinaryKind::Div),
+        BinaryOp::Mod => Some(BinaryKind::Mod),
+        BinaryOp::Exp => Some(BinaryKind::Exp),
+        BinaryOp::BitAnd => Some(BinaryKind::BitAnd),
+        BinaryOp::BitOr => Some(BinaryKind::BitOr),
+        BinaryOp::BitXor => Some(BinaryKind::BitXor),
+        BinaryOp::Shl => Some(BinaryKind::Shl),
+        BinaryOp::Shr => Some(BinaryKind::Shr),
+        BinaryOp::UShr => Some(BinaryKind::UShr),
+        _ => None,
+    }
+}
+
+pub(super) fn assign_binary_kind(op: AssignOp) -> Option<BinaryKind> {
+    match op {
+        AssignOp::Add => Some(BinaryKind::Add),
+        AssignOp::Sub => Some(BinaryKind::Sub),
+        AssignOp::Mul => Some(BinaryKind::Mul),
+        AssignOp::Div => Some(BinaryKind::Div),
+        AssignOp::Mod => Some(BinaryKind::Mod),
+        AssignOp::Exp => Some(BinaryKind::Exp),
+        AssignOp::BitAnd => Some(BinaryKind::BitAnd),
+        AssignOp::BitOr => Some(BinaryKind::BitOr),
+        AssignOp::BitXor => Some(BinaryKind::BitXor),
+        AssignOp::Shl => Some(BinaryKind::Shl),
+        AssignOp::Shr => Some(BinaryKind::Shr),
+        AssignOp::UShr => Some(BinaryKind::UShr),
+        _ => None,
+    }
+}
+
 pub(super) fn binary_op(op: BinaryOp) -> Op {
     match op {
         BinaryOp::Add => Op::Add,

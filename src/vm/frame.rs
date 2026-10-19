@@ -90,8 +90,8 @@ impl Frame {
             this: JsValue::Undefined,
             global_this: false,
             callee: None,
-            stack: ValueStack::new(),
-            arguments: ArgumentStack::new(),
+            stack: ValueStack::with_capacity(32),
+            arguments: ArgumentStack::with_capacity(4),
             handlers: Vec::new(),
             pc: 0,
             completion: None,
@@ -224,6 +224,31 @@ impl Frame {
             .get(offset + slot)
             .cloned()
             .unwrap_or(JsValue::Undefined)
+    }
+
+    /// Borrow a local slot without cloning it. Returns `None` for captured
+    /// variables (which live in an environment) and out-of-range slots.
+    #[inline(always)]
+    pub(crate) fn get_var_ref(&self, depth: u16, slot: u16) -> Option<&JsValue> {
+        if slot & crate::bytecode::ENV_SLOT != 0 {
+            return None;
+        }
+        let (offset, size) = if depth == 0 {
+            (self.local_offset, self.local_size)
+        } else {
+            let count = self.local_frames.len();
+            let depth = depth as usize;
+            if depth >= count {
+                return None;
+            }
+            self.local_frames[count - 1 - depth]
+        };
+        let slot = slot as usize;
+        if slot < size {
+            self.locals.get(offset + slot)
+        } else {
+            None
+        }
     }
 
     #[inline(always)]

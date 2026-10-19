@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::*;
-use crate::bytecode::{ClassDef, ClassMethod, CompareOp, Constant, FunctionDef, Op};
+use crate::bytecode::{BinaryKind, ClassDef, ClassMethod, CompareOp, Constant, FunctionDef, Op};
 use crate::parser::ParseError;
 
 #[derive(Clone)]

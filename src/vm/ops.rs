@@ -1,4 +1,4 @@
-//! Opcode dispatch and operand-stack helpers.
+﻿//! Opcode dispatch and operand-stack helpers.
 //!
 //! This is the Rust counterpart of the giant switch in QuickJS
 //! `JS_CallInternal` (quickjs.c:18051); the fused operands mirror QuickJS'
@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use super::frame::{Frame, Handler, Step};
 use super::{ArgumentStack, ValueStack, constant_string, constant_strings};
-use crate::bytecode::{CompareOp, Constant, FunctionDef, Op};
+use crate::bytecode::{BinaryKind, CompareOp, Constant, FunctionDef, Op};
 use crate::object::{Object, ObjectData, ObjectKind, PropKey, Property, RegExpData};
 use crate::runtime::Realm;
 use crate::value::JsValue;
@@ -24,13 +24,50 @@ use super::property::{
     set_element_value, set_value_property,
 };
 
+#[cfg(feature = "op_stats")]
+thread_local! {
+    static OP_STATS: std::cell::RefCell<
+        std::collections::HashMap<std::mem::Discriminant<Op>, (String, u64)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(feature = "op_stats")]
+pub(crate) fn record_op(op: &Op) {
+    OP_STATS.with(|stats| {
+        let mut stats = stats.borrow_mut();
+        let entry = stats
+            .entry(std::mem::discriminant(op))
+            .or_insert_with(|| {
+                let text = format!("{op:?}");
+                let end = text.find(['(', '{']).unwrap_or(text.len());
+                (text[..end].to_string(), 0)
+            });
+        entry.1 += 1;
+    });
+}
+
+#[cfg(feature = "op_stats")]
+pub(crate) fn dump_op_stats() {
+    OP_STATS.with(|stats| {
+        let stats = stats.borrow();
+        let mut rows: Vec<_> = stats.values().collect();
+        rows.sort_unstable_by_key(|(_, count)| std::cmp::Reverse(*count));
+        let total: u64 = rows.iter().map(|(_, count)| *count).sum();
+        eprintln!("opcode samples: {total}");
+        eprintln!(
+            "Op size {} Step size {} JsValue size {}",
+            std::mem::size_of::<Op>(),
+            std::mem::size_of::<Step>(),
+            std::mem::size_of::<JsValue>()
+        );
+        for (name, count) in rows {
+            eprintln!("{count:12} {:5.2}% {name}", 100.0 * *count as f64 / total as f64);
+        }
+    });
+}
+
 /// Opcode dispatch. This is the Rust counterpart of the giant switch in
 /// QuickJS `JS_CallInternal` (quickjs.c:18051).
-/// Hot opcodes, inlined into the dispatch loop.
-///
-/// Keeping this subset small shrinks `run_loop`'s stack frame and callee-save
-/// set, which is paid on every JS call; everything else goes through the
-/// out-of-line [`execute_op`]. `Ok(None)` means "not a hot opcode".
 #[inline(always)]
 pub(crate) fn execute_op(
     realm: &mut Realm,
@@ -96,30 +133,57 @@ pub(crate) fn execute_op(
             key,
             cache,
         } => {
-            let object = frame.get_var(depth, slot);
-            let value = match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => super::property::cached_get_const(
-                    realm,
-                    &object,
-                    &frame.definition,
-                    key,
-                    prop_cache,
-                )?,
-                None => get_value_property(realm, &object, &PropKey::from(""))?,
+            let value = match frame.get_var_ref(depth, slot) {
+                Some(object) => match frame.definition.prop_caches.get(cache as usize) {
+                    Some(prop_cache) => super::property::cached_get_const(
+                        realm,
+                        object,
+                        &frame.definition,
+                        key,
+                        prop_cache,
+                    )?,
+                    None => get_value_property(realm, object, &PropKey::from(""))?,
+                },
+                None => {
+                    let object = frame.get_var(depth, slot);
+                    match frame.definition.prop_caches.get(cache as usize) {
+                        Some(prop_cache) => super::property::cached_get_const(
+                            realm,
+                            &object,
+                            &frame.definition,
+                            key,
+                            prop_cache,
+                        )?,
+                        None => get_value_property(realm, &object, &PropKey::from(""))?,
+                    }
+                }
             };
             frame.stack.push(value);
         }
         Op::GetThisPropConst { key, cache } => {
-            let object = frame.this_value(realm);
-            let value = match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => super::property::cached_get_const(
-                    realm,
-                    &object,
-                    &frame.definition,
-                    key,
-                    prop_cache,
-                )?,
-                None => get_value_property(realm, &object, &PropKey::from(""))?,
+            let value = if frame.global_this {
+                let object = JsValue::Object(realm.global.clone());
+                match frame.definition.prop_caches.get(cache as usize) {
+                    Some(prop_cache) => super::property::cached_get_const(
+                        realm,
+                        &object,
+                        &frame.definition,
+                        key,
+                        prop_cache,
+                    )?,
+                    None => get_value_property(realm, &object, &PropKey::from(""))?,
+                }
+            } else {
+                match frame.definition.prop_caches.get(cache as usize) {
+                    Some(prop_cache) => super::property::cached_get_const(
+                        realm,
+                        &frame.this,
+                        &frame.definition,
+                        key,
+                        prop_cache,
+                    )?,
+                    None => get_value_property(realm, &frame.this, &PropKey::from(""))?,
+                }
             };
             frame.stack.push(value);
         }
@@ -251,6 +315,28 @@ pub(crate) fn execute_op(
                 Vec::new()
             };
             frame.stack.push(JsValue::Object(realm.array(rest)));
+        }
+        Op::GetLocal(slot) => {
+            let slot = slot as usize;
+            let value = if slot < frame.local_size {
+                frame
+                    .locals
+                    .get(frame.local_offset + slot)
+                    .cloned()
+                    .unwrap_or(JsValue::Undefined)
+            } else {
+                JsValue::Undefined
+            };
+            frame.stack.push(value);
+        }
+        Op::SetLocal(slot) => {
+            let value = pop(&mut frame.stack)?;
+            let slot = slot as usize;
+            if slot < frame.local_size
+                && let Some(target) = frame.locals.get_mut(frame.local_offset + slot)
+            {
+                *target = value;
+            }
         }
         Op::GetVar { depth, slot } => {
             let value = frame.get_var(depth, slot);
@@ -725,6 +811,68 @@ pub(crate) fn execute_op(
                 None => super::add_values(realm, left, right)?,
             };
             frame.stack.push(result);
+        }
+        Op::BinaryVars {
+            op,
+            left_depth,
+            left_slot,
+            right_depth,
+            right_slot,
+        } => {
+            let left = frame.get_var(left_depth, left_slot);
+            let right = frame.get_var(right_depth, right_slot);
+            frame
+                .stack
+                .push(binary_values(realm, left, right, op)?);
+        }
+        Op::BinaryVarConst {
+            op,
+            depth,
+            slot,
+            value,
+        } => {
+            let left = frame.get_var(depth, slot);
+            let right = constant_value(realm, &frame.definition, value, frame.env.as_ref())?;
+            frame
+                .stack
+                .push(binary_values(realm, left, right, op)?);
+        }
+        Op::BinaryVar {
+            op,
+            dst_depth,
+            dst_slot,
+            src_depth,
+            src_slot,
+        } => {
+            let left = frame.get_var(dst_depth, dst_slot);
+            let right = frame.get_var(src_depth, src_slot);
+            let value = binary_values(realm, left, right, op)?;
+            frame.set_var(dst_depth, dst_slot, value.clone());
+            frame.stack.push(value);
+        }
+        Op::BinaryVarConstStore {
+            op,
+            depth,
+            slot,
+            value,
+        } => {
+            let left = frame.get_var(depth, slot);
+            let right = constant_value(realm, &frame.definition, value, frame.env.as_ref())?;
+            let value = binary_values(realm, left, right, op)?;
+            frame.set_var(depth, slot, value.clone());
+            frame.stack.push(value);
+        }
+        Op::BinaryVarDiscard {
+            op,
+            dst_depth,
+            dst_slot,
+            src_depth,
+            src_slot,
+        } => {
+            let left = frame.get_var(dst_depth, dst_slot);
+            let right = frame.get_var(src_depth, src_slot);
+            let value = binary_values(realm, left, right, op)?;
+            frame.set_var(dst_depth, dst_slot, value);
         }
         Op::CompareVarConst {
             op,
@@ -1347,6 +1495,97 @@ pub(crate) fn execute_op(
     Ok(Step::Continue)
 }
 
+/// Evaluate one generic local binary operation. The opcode is fixed per
+/// bytecode site, so the operator branch predicts perfectly while the loads
+/// and stores disappear into the fused instruction.
+#[inline(always)]
+fn binary_values(
+    realm: &mut Realm,
+    left: JsValue,
+    right: JsValue,
+    op: BinaryKind,
+) -> JsResult<JsValue> {
+    match op {
+        BinaryKind::Add => match add_ints(&left, &right) {
+            Some(value) => Ok(value),
+            None => super::add_values(realm, left, right),
+        },
+        BinaryKind::Sub => {
+            if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+                let value = *left as i64 - *right as i64;
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+                    return Ok(JsValue::Int(value as i32));
+                }
+            }
+            if let (JsValue::Float(left), JsValue::Float(right)) = (&left, &right) {
+                return Ok(JsValue::Float(*left - *right));
+            }
+            Ok(JsValue::number(
+                super::to_numeric(realm, left)? - super::to_numeric(realm, right)?,
+            ))
+        }
+        BinaryKind::Mul => {
+            if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+                let value = *left as i64 * *right as i64;
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+                    return Ok(JsValue::Int(value as i32));
+                }
+            }
+            if let (JsValue::Float(left), JsValue::Float(right)) = (&left, &right) {
+                return Ok(JsValue::Float(*left * *right));
+            }
+            Ok(JsValue::number(
+                super::to_numeric(realm, left)? * super::to_numeric(realm, right)?,
+            ))
+        }
+        BinaryKind::Div => {
+            if let (JsValue::Float(left), JsValue::Float(right)) = (&left, &right) {
+                return Ok(JsValue::Float(*left / *right));
+            }
+            Ok(JsValue::number(
+                super::to_numeric(realm, left)? / super::to_numeric(realm, right)?,
+            ))
+        }
+        BinaryKind::Mod => Ok(JsValue::number(
+            super::to_numeric(realm, left)? % super::to_numeric(realm, right)?,
+        )),
+        BinaryKind::Exp => Ok(JsValue::number(crate::coerce::js_pow(
+            super::to_numeric(realm, left)?,
+            super::to_numeric(realm, right)?,
+        ))),
+        BinaryKind::BitAnd => binary_int_values(realm, left, right, |a, b| a & b),
+        BinaryKind::BitOr => binary_int_values(realm, left, right, |a, b| a | b),
+        BinaryKind::BitXor => binary_int_values(realm, left, right, |a, b| a ^ b),
+        BinaryKind::Shl => binary_int_values(realm, left, right, |a, b| {
+            a.wrapping_shl((b & 31) as u32)
+        }),
+        BinaryKind::Shr => binary_int_values(realm, left, right, |a, b| {
+            a.wrapping_shr((b & 31) as u32)
+        }),
+        BinaryKind::UShr => Ok(JsValue::number(
+            (super::to_uint32(super::to_numeric(realm, left)?)
+                >> (super::to_uint32(super::to_numeric(realm, right)?) & 31))
+                as f64,
+        )),
+    }
+}
+
+#[inline(always)]
+fn binary_int_values(
+    realm: &mut Realm,
+    left: JsValue,
+    right: JsValue,
+    operation: impl Fn(i32, i32) -> i32,
+) -> JsResult<JsValue> {
+    if let (JsValue::Int(left), JsValue::Int(right)) = (&left, &right) {
+        return Ok(JsValue::Int(operation(*left, *right)));
+    }
+    Ok(JsValue::Int(operation(
+        super::to_int32(super::to_numeric(realm, left)?),
+        super::to_int32(super::to_numeric(realm, right)?),
+    )))
+}
+
 /// Fast i32+i32; overflow falls back to the Number path in `add_values`.
 #[inline]
 fn add_ints(left: &JsValue, right: &JsValue) -> Option<JsValue> {
@@ -1516,7 +1755,7 @@ fn pop_array(stack: &mut ValueStack) -> JsResult<Vec<JsValue>> {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn constant_value(
     realm: &mut Realm,
     definition: &FunctionDef,
@@ -1527,13 +1766,27 @@ fn constant_value(
         Some(Constant::Int(value)) => Ok(JsValue::Int(*value)),
         Some(Constant::Number(value)) => Ok(JsValue::number(*value)),
         Some(Constant::String(value)) => Ok(JsValue::String(value.clone())),
-        Some(Constant::Function(function)) => Ok(realm.make_js_function(
+        Some(value) => constant_value_slow(realm, value, env),
+        None => Err(JsValue::string("InternalError: invalid constant")),
+    }
+}
+
+/// Function, class and regular-expression constants allocate and are rare in
+/// hot loops, so they stay out of the inlined constant fast path.
+#[inline(never)]
+fn constant_value_slow(
+    realm: &mut Realm,
+    constant: &Constant,
+    env: Option<&EnvRef>,
+) -> JsResult<JsValue> {
+    match constant {
+        Constant::Function(function) => Ok(realm.make_js_function(
             function.clone(),
             env.expect("function constant requires an environment")
                 .clone(),
             None,
         )),
-        Some(Constant::Class(class)) => {
+        Constant::Class(class) => {
             let value = create_class(
                 realm,
                 class,
@@ -1542,14 +1795,13 @@ fn constant_value(
             )?;
             Ok(value)
         }
-        Some(Constant::Strings(_)) => Err(JsValue::string(
+        Constant::Strings(_) => Err(JsValue::string(
             "InternalError: invalid string-array constant",
         )),
-        Some(Constant::Regex { source, flags }) => {
-            let regex =
-                regress::Regex::with_flags(source.as_ref(), flags.as_ref()).map_err(|error| {
-                    realm.syntax_error(format!("Invalid regular expression: {error}"))
-                })?;
+        Constant::Regex { source, flags } => {
+            let regex = regress::Regex::with_flags(source.as_ref(), flags.as_ref()).map_err(
+                |error| realm.syntax_error(format!("Invalid regular expression: {error}")),
+            )?;
             let data = Rc::new(RegExpData {
                 source: source.to_string(),
                 flags: flags.to_string(),
@@ -1559,7 +1811,9 @@ fn constant_value(
             let object = Gc::new(GcRefCell::new(object));
             Ok(JsValue::Object(object))
         }
-        None => Err(JsValue::string("InternalError: invalid constant")),
+        Constant::Int(_) | Constant::Number(_) | Constant::String(_) => {
+            unreachable!("fast constants are handled before the slow path")
+        }
     }
 }
 
