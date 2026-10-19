@@ -550,7 +550,8 @@ impl Compiler {
                 .iter()
                 .flat_map(|declarator| pattern_names(&declarator.pattern))
                 .collect();
-            if !names.iter().any(|name| self.name_is_captured(name)) {
+            if self.local_frames.len() == 1 && !names.iter().any(|name| self.name_is_captured(name))
+            {
                 let frame = self.local_frames.last_mut().expect("scope frame");
                 for name in &names {
                     frame.declare(name);
@@ -872,7 +873,7 @@ impl Compiler {
                 .first()
                 .map(|declarator| pattern_names(&declarator.pattern))
                 .unwrap_or_default();
-            !names.iter().any(|name| self.name_is_captured(name))
+            self.local_frames.len() == 1 && !names.iter().any(|name| self.name_is_captured(name))
         } else {
             false
         };
