@@ -1,21 +1,17 @@
-//! Boa's **`boa_gc`** crate implements a garbage collector.
+//! Garbage collection.
 //!
-//! # Crate Overview
-//! **`boa_gc`** is a mark-sweep garbage collector that implements a [`Trace`] and [`Finalize`] trait
-//! for garbage collected values.
-#![doc = include_str!("../ABOUT.md")]
-#![doc(
-    html_logo_url = "https://raw.githubusercontent.com/boa-dev/boa/main/assets/logo_black.svg",
-    html_favicon_url = "https://raw.githubusercontent.com/boa-dev/boa/main/assets/logo_black.svg"
-)]
-#![cfg_attr(not(test), forbid(clippy::unwrap_used))]
-#![allow(
-    clippy::module_name_repetitions,
-    clippy::redundant_pub_crate,
-    clippy::let_unit_value
-)]
+//! The collector is a copy of Boa's `boa_gc` 0.22 mark-sweep collector,
+//! adapted to live inside the engine. `Gc<T>` handles carry the collector's
+//! root accounting, cycles are found by tracing, and `WeakGc`/`Ephemeron`/
+//! `WeakMap` provide weak references. Allocation drives collection once the
+//! adaptive byte threshold is reached; [`run_gc_now`] forces a collection.
+//!
+//! See `README.md` in this directory for the upstream attribution and the
+//! local changes made for the engine.
 
-extern crate self as boa_gc;
+// The collector necessarily uses pointer-level bookkeeping internally; the
+// public `Gc`/`GcRefCell` handles keep it encapsulated.
+#![allow(unsafe_code)]
 
 mod cell;
 mod pointers;
@@ -31,10 +27,23 @@ use std::{
     ptr::NonNull,
 };
 
-pub use crate::trace::{Finalize, Trace, Tracer};
+pub use crate::gc::trace::{Finalize, Trace, Tracer};
 pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
 pub use pointers::{Ephemeron, Gc, GcErased, WeakGc, WeakMap};
+
+pub use crate::custom_trace;
+pub use crate::empty_trace;
+
+/// Allocate a traced object cell for the engine's object model.
+pub(crate) fn allocate_object(data: crate::object::ObjectData) -> crate::object::ObjRef {
+    Gc::new(GcRefCell::new(data))
+}
+
+/// Force a full collection (`Context::run_gc` / `Runtime::run_gc`).
+pub fn run_gc_now() {
+    force_collect();
+}
 
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
@@ -135,7 +144,7 @@ impl Allocator {
 
             Self::manage_state(&mut gc);
             // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
-            let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
+            let ptr = Box::into_non_null(Box::new(value));
             let erased: NonNull<GcBox<NonTraceable>> = ptr.cast();
 
             gc.strongs.push(erased);
@@ -154,7 +163,7 @@ impl Allocator {
 
             Self::manage_state(&mut gc);
             // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
-            let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
+            let ptr = Box::into_non_null(Box::new(value));
             let erased: NonNull<dyn ErasedEphemeronBox> = ptr;
 
             gc.weaks.push(erased);
@@ -176,7 +185,7 @@ impl Allocator {
             let weak_box = WeakMapBox { map: weak };
 
             // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
-            let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(weak_box))) };
+            let ptr = Box::into_non_null(Box::new(weak_box));
             let erased: ErasedWeakMapBoxPointer = ptr;
 
             gc.weak_maps.push(erased);

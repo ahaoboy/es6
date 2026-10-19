@@ -15,8 +15,7 @@ timers = []
 
 [dependencies]
 thiserror = "2"
-# Vendored Boa mark-sweep collector; see vendor/boa_gc/README.md.
-boa_gc = { path = "vendor/boa_gc" }
+hashbrown = "0.17"
 compact_str = "0.10"
 indexmap = "2"
 unicode-ident = "1"

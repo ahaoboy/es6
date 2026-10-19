@@ -1,4 +1,4 @@
-use crate::Trace;
+use crate::gc::Trace;
 
 use super::{DropFn, GcHeader, RunFinalizerFn, TraceFn, TraceNonRootsFn, VTable, vtable_of};
 

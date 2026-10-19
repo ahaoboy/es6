@@ -2,7 +2,7 @@
 //! the rquickjs-style API surface over `ObjectData`.
 
 use super::*;
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 
 #[derive(Clone)]
 pub struct Object {

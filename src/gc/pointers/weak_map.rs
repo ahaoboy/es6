@@ -6,7 +6,7 @@ use hashbrown::{
     hash_table::{Entry as RawEntry, Iter as RawIter},
 };
 
-use crate::{Allocator, Ephemeron, Finalize, Gc, GcRef, GcRefCell, Trace, custom_trace};
+use crate::gc::{Allocator, Ephemeron, Finalize, Gc, GcRef, GcRefCell, Trace, custom_trace};
 use std::{fmt, hash::BuildHasher, marker::PhantomData};
 
 /// A map that holds weak references to its keys and is traced by the garbage collector.

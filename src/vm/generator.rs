@@ -176,7 +176,7 @@ fn finish_generator(
     object: &crate::object::ObjRef,
     result: JsResult<RunOutcome>,
 ) -> JsResult<JsValue> {
-    // un_loop recycles the frame on every non-yield completion.
+    // run_loop recycles the frame on every non-yield completion.
     match result {
         Ok(RunOutcome::Return(value)) => {
             set_generator_state(object, GeneratorState::Completed);

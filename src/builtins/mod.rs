@@ -2,7 +2,7 @@
 //! mirroring the split used by QuickJS' `JS_AddIntrinsic*` functions
 //! (`quickjs.c`, around the `JS_NewContextRaw` initialization table).
 
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 mod array;
 mod boolean;
 mod buffer;

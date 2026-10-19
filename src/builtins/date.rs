@@ -2,7 +2,7 @@
 //! mirroring QuickJS' `js_date_*` (quickjs.c) helpers built on MakeDay /
 //! MakeTime / MakeDay computations (ES2022 20.4.1.11+) and TimeClip.
 
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 
 use super::*;
 use crate::object::{ObjectData, ObjectKind};

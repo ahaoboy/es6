@@ -2,7 +2,7 @@ use super::*;
 use crate::object::PromiseState;
 use crate::promise as core;
 use crate::value::JsValue;
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 
 // QuickJS: JS_AddIntrinsicPromise / js_promise_* (quickjs.c). The state and
 // job machinery lives in `crate::promise`, mirroring `JSPromiseData` and

@@ -4,7 +4,7 @@
 //! (quickjs.c:10551).
 
 use super::*;
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 
 impl ObjectData {
     pub fn get_property(

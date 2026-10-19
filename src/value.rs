@@ -1,7 +1,7 @@
 use std::fmt;
 use std::rc::Rc;
 
-use boa_gc::{Finalize, Gc, GcRefCell};
+use crate::gc::{Finalize, Gc, GcRefCell};
 
 use crate::bytecode::FunctionDef;
 use crate::object::{Function, ObjRef, Object, ObjectData};
@@ -358,8 +358,8 @@ impl FromJs for Function {
 
 impl Finalize for Env {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for Env {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for Env {
+    crate::gc::custom_trace!(this, mark, {
         if let Some(parent) = &this.parent {
             mark(parent);
         }
@@ -376,8 +376,8 @@ unsafe impl boa_gc::Trace for Env {
 
 impl Finalize for JsValue {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for JsValue {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for JsValue {
+    crate::gc::custom_trace!(this, mark, {
         if let JsValue::Object(object) = this {
             mark(object);
         }

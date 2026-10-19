@@ -1,4 +1,4 @@
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 use std::rc::Rc;
 
 use super::*;

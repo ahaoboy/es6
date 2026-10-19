@@ -4,7 +4,7 @@
 //! `JS_CallInternal` (quickjs.c:18051); the fused operands mirror QuickJS'
 //! short opcodes (`quickjs-opcode.h`).
 
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 use std::rc::Rc;
 
 use super::frame::{Frame, Handler, Step};

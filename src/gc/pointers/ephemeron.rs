@@ -1,6 +1,6 @@
 #![allow(clippy::doc_link_with_quotes)]
 
-use crate::{
+use crate::gc::{
     Allocator, Gc, Tracer, finalizer_safe,
     internals::EphemeronBox,
     trace::{Finalize, Trace},

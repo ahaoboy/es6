@@ -5,7 +5,7 @@
 //! `construct_value` mirrors `JS_CallConstructorInternal` (quickjs.c:21078)
 //! with receiver allocation like `JS_NewObjectFromShape` (quickjs.c:6136).
 
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 use std::rc::Rc;
 
 use super::ArgumentStack;

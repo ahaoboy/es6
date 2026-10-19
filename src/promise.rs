@@ -7,7 +7,7 @@
 //! functions with data (`js_c_function_data`, quickjs.c:6595) whose payloads
 //! `mark_children` walks (quickjs.c:7255).
 
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 
 use crate::object::{NativeData, ObjRef, ObjectKind, PromiseReaction, PromiseState, PropKey};
 use crate::runtime::Realm;

@@ -1,4 +1,4 @@
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;

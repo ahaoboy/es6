@@ -5,7 +5,7 @@
 //! (quickjs.c:427) and whose dispatch loop is the counterpart of
 //! `JS_CallInternal` (quickjs.c:18051).
 
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 mod call;
 pub(crate) mod error;
 mod frame;

@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use boa_gc::{Finalize, Gc, GcRefCell};
+use crate::gc::{Finalize, Gc, GcRefCell};
 
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
@@ -20,8 +20,8 @@ pub type NativeFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue]) -> JsResult<JsVa
 /// `mark_children` (quickjs.c:7255).
 pub type DataFn = Rc<dyn Fn(&mut Realm, &JsValue, &[JsValue], &[JsValue]) -> JsResult<JsValue>>;
 pub type NativeData = Gc<GcRefCell<Vec<JsValue>>>;
-pub type WeakObjectMap = boa_gc::WeakMap<GcRefCell<ObjectData>, JsValue>;
-pub type WeakObjectSet = boa_gc::WeakMap<GcRefCell<ObjectData>, ()>;
+pub type WeakObjectMap = crate::gc::WeakMap<GcRefCell<ObjectData>, JsValue>;
+pub type WeakObjectSet = crate::gc::WeakMap<GcRefCell<ObjectData>, ()>;
 
 /// Shared object shape, the counterpart of QuickJS `JSShape` (quickjs.c:1102):
 /// an immutable key vector plus a key-to-slot index. Objects with the same
@@ -958,8 +958,8 @@ pub use wrappers::*;
 
 impl Finalize for Property {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for Property {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for Property {
+    crate::gc::custom_trace!(this, mark, {
         mark(&this.value);
         if let Some(get) = &this.get {
             mark(&**get);
@@ -972,8 +972,8 @@ unsafe impl boa_gc::Trace for Property {
 
 impl Finalize for ObjectData {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for ObjectData {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for ObjectData {
+    crate::gc::custom_trace!(this, mark, {
         for property in &this.props {
             mark(property);
         }

@@ -1,4 +1,4 @@
-use crate::{Ephemeron, Finalize, Gc, Trace, custom_trace};
+use crate::gc::{Ephemeron, Finalize, Gc, Trace, custom_trace};
 use std::hash::{Hash, Hasher};
 
 /// A weak reference to a [`Gc`].

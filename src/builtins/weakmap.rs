@@ -4,7 +4,7 @@
 //! only while the key is reachable, matching the weak-map semantics QuickJS
 //! implements with its weak reference lists.
 
-use boa_gc::{Gc, GcRefCell};
+use crate::gc::{Gc, GcRefCell};
 
 use super::*;
 use crate::object::{ObjectData, ObjectKind, WeakObjectMap, WeakObjectSet};

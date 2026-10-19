@@ -1,6 +1,6 @@
 //! A garbage collected cell implementation
 
-use crate::{
+use crate::gc::{
     Tracer,
     trace::{Finalize, Trace},
 };

@@ -114,7 +114,7 @@ pub(crate) fn cached_get_const(
             && (entry.object_shape == shape || entry.poly_proto(shape))
             && entry.prototype_generation == crate::object::prototype_generation()
             && data.prototype.as_ref().map(|proto| {
-                proto.as_ref() as *const boa_gc::GcRefCell<crate::object::ObjectData> as usize
+                proto.as_ref() as *const crate::gc::GcRefCell<crate::object::ObjectData> as usize
             }) == entry.receiver_proto
         {
             read_proto_holder(
@@ -211,7 +211,7 @@ pub(crate) fn cached_get_property(
                 }
             } else if entry.prototype_generation == crate::object::prototype_generation()
                 && data.prototype.as_ref().map(|proto| {
-                    proto.as_ref() as *const boa_gc::GcRefCell<crate::object::ObjectData> as usize
+                    proto.as_ref() as *const crate::gc::GcRefCell<crate::object::ObjectData> as usize
                 }) == entry.receiver_proto
             {
                 read_proto_holder(
@@ -261,7 +261,7 @@ pub(crate) fn cached_get_property(
                     entry.holder_shape = shape;
                     entry.holder_depth = depth;
                     entry.receiver_proto = receiver.prototype.as_ref().map(|proto| {
-                        proto.as_ref() as *const boa_gc::GcRefCell<crate::object::ObjectData>
+                        proto.as_ref() as *const crate::gc::GcRefCell<crate::object::ObjectData>
                             as usize
                     });
                     entry.prototype_generation = crate::object::prototype_generation();
@@ -577,7 +577,7 @@ fn read_proto_holder(
     key: Option<&crate::object::PropKey>,
 ) -> Option<(JsValue, Option<JsValue>)> {
     fn walk(
-        cell: &boa_gc::GcRefCell<crate::object::ObjectData>,
+        cell: &crate::gc::GcRefCell<crate::object::ObjectData>,
         depth: u32,
         holder_shape: u64,
         index: u32,

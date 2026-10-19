@@ -1,9 +1,9 @@
-use crate::{Gc, GcBox, Tracer, trace::Trace};
+use crate::gc::{Gc, GcBox, Tracer, trace::Trace};
 use std::{cell::UnsafeCell, ptr::NonNull};
 
 use super::GcHeader;
 
-/// The inner allocation of an [`Ephemeron`][crate::Ephemeron] pointer.
+/// The inner allocation of an [`Ephemeron`][crate::gc::Ephemeron] pointer.
 pub(crate) struct EphemeronBox<K: Trace + ?Sized + 'static, V: Trace + 'static> {
     pub(crate) header: GcHeader,
     data: UnsafeCell<Option<Data<K, V>>>,

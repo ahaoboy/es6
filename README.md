@@ -43,9 +43,9 @@ exports namespace.
 
 ## Garbage collection
 
-Objects, environments and native data cells are managed by the vendored
-Boa mark-sweep collector. Handles use `Gc<T>` root accounting; cycles are
-collected by tracing, and `WeakMap`/`WeakSet` entries use ephemeron
+Objects, environments and native data cells are managed by the Boa-derived
+mark-sweep collector in `src/gc`. Handles use `Gc<T>` root accounting; cycles
+are collected by tracing, and `WeakMap`/`WeakSet` entries use ephemeron
 semantics. Allocation triggers collection once the heap crosses an adaptive
 byte threshold, and `Runtime::run_gc` forces a full collection.
 
@@ -62,7 +62,7 @@ src/
   vm/         activation records, dispatch loop, call machinery, property
               paths with inline caches, iteration protocol, generators
   object/     object model, exotic payloads, public handles
-  gc.rs       Boa collector integration (collector vendored in vendor/boa_gc)
+  gc/         Boa-derived mark-sweep collector and engine integration
   promise.rs  promise reactions, combinator records, job queue
   runtime.rs  Realm, Runtime and Context
   builtins/   one module per constructor/prototype pair

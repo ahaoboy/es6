@@ -15,9 +15,9 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use crate::GcErasedPointer;
+use crate::gc::GcErasedPointer;
 
-/// A queue used to trace [`crate::Gc<T>`] non-recursively.
+/// A queue used to trace [`crate::gc::Gc<T>`] non-recursively.
 #[doc(hidden)]
 #[allow(missing_debug_implementations)]
 pub struct Tracer {
@@ -102,12 +102,12 @@ pub unsafe trait Trace: Finalize {
 macro_rules! empty_trace {
     () => {
         #[inline]
-        unsafe fn trace(&self, _tracer: &mut $crate::Tracer) {}
+        unsafe fn trace(&self, _tracer: &mut $crate::gc::Tracer) {}
         #[inline]
         unsafe fn trace_non_roots(&self) {}
         #[inline]
         fn run_finalizer(&self) {
-            $crate::Finalize::finalize(self)
+            $crate::gc::Finalize::finalize(self)
         }
     };
 }
@@ -125,11 +125,11 @@ macro_rules! empty_trace {
 macro_rules! custom_trace {
     ($this:ident, $marker:ident, $body:expr) => {
         #[inline]
-        unsafe fn trace(&self, tracer: &mut $crate::Tracer) {
-            let mut $marker = |it: &dyn $crate::Trace| {
+        unsafe fn trace(&self, tracer: &mut $crate::gc::Tracer) {
+            let mut $marker = |it: &dyn $crate::gc::Trace| {
                 // SAFETY: The implementor must ensure that `trace` is correctly implemented.
                 unsafe {
-                    $crate::Trace::trace(it, tracer);
+                    $crate::gc::Trace::trace(it, tracer);
                 }
             };
             let $this = self;
@@ -137,10 +137,10 @@ macro_rules! custom_trace {
         }
         #[inline]
         unsafe fn trace_non_roots(&self) {
-            fn $marker<T: $crate::Trace + ?Sized>(it: &T) {
+            fn $marker<T: $crate::gc::Trace + ?Sized>(it: &T) {
                 // SAFETY: The implementor must ensure that `trace` is correctly implemented.
                 unsafe {
-                    $crate::Trace::trace_non_roots(it);
+                    $crate::gc::Trace::trace_non_roots(it);
                 }
             }
             let $this = self;
@@ -148,10 +148,10 @@ macro_rules! custom_trace {
         }
         #[inline]
         fn run_finalizer(&self) {
-            fn $marker<T: $crate::Trace + ?Sized>(it: &T) {
-                $crate::Trace::run_finalizer(it);
+            fn $marker<T: $crate::gc::Trace + ?Sized>(it: &T) {
+                $crate::gc::Trace::run_finalizer(it);
             }
-            $crate::Finalize::finalize(self);
+            $crate::gc::Finalize::finalize(self);
             let $this = self;
             $body
         }
@@ -281,7 +281,7 @@ macro_rules! tuple_finalize_trace {
         impl<$($args),*> Finalize for ($($args,)*) {}
         // SAFETY:
         // All elements inside the tuple are correctly marked.
-        unsafe impl<$($args: $crate::Trace),*> Trace for ($($args,)*) {
+        unsafe impl<$($args: $crate::gc::Trace),*> Trace for ($($args,)*) {
             custom_trace!(this, mark, {
                 #[allow(non_snake_case, unused_unsafe, unused_mut)]
                 let mut avoid_lints = |&($(ref $args,)*): &($($args,)*)| {
@@ -356,32 +356,6 @@ unsafe impl<T: Trace> Trace for Box<[T]> {
 impl<T: Trace> Finalize for Vec<T> {}
 // SAFETY: All the inner elements of the `Vec` are correctly marked.
 unsafe impl<T: Trace> Trace for Vec<T> {
-    custom_trace!(this, mark, {
-        for e in this {
-            mark(e);
-        }
-    });
-}
-
-#[cfg(feature = "thin-vec")]
-impl<T: Trace> Finalize for thin_vec::ThinVec<T> {}
-
-#[cfg(feature = "thin-vec")]
-// SAFETY: All the inner elements of the `Vec` are correctly marked.
-unsafe impl<T: Trace> Trace for thin_vec::ThinVec<T> {
-    custom_trace!(this, mark, {
-        for e in this {
-            mark(e);
-        }
-    });
-}
-
-#[cfg(feature = "arrayvec")]
-impl<T: Trace, const N: usize> Finalize for arrayvec::ArrayVec<T, N> {}
-
-#[cfg(feature = "arrayvec")]
-// SAFETY: All the inner elements of the `ArrayVec` are correctly marked.
-unsafe impl<T: Trace, const N: usize> Trace for arrayvec::ArrayVec<T, N> {
     custom_trace!(this, mark, {
         for e in this {
             mark(e);
@@ -538,52 +512,4 @@ unsafe impl<T: Trace> Trace for OnceCell<T> {
             mark(v);
         }
     });
-}
-
-#[cfg(feature = "icu")]
-mod icu {
-    use icu_locale_core::{LanguageIdentifier, Locale};
-
-    use crate::{Finalize, Trace};
-
-    impl Finalize for LanguageIdentifier {}
-
-    // SAFETY: `LanguageIdentifier` doesn't have any traceable data.
-    unsafe impl Trace for LanguageIdentifier {
-        empty_trace!();
-    }
-
-    impl Finalize for Locale {}
-
-    // SAFETY: `LanguageIdentifier` doesn't have any traceable data.
-    unsafe impl Trace for Locale {
-        empty_trace!();
-    }
-}
-
-#[cfg(feature = "boa_string")]
-mod boa_string_trace {
-    use crate::{Finalize, Trace};
-
-    // SAFETY: `boa_string::JsString` doesn't have any traceable data.
-    unsafe impl Trace for boa_string::JsString {
-        empty_trace!();
-    }
-
-    impl Finalize for boa_string::JsString {}
-}
-#[cfg(feature = "either")]
-mod either_trace {
-    use crate::{Finalize, Trace};
-
-    impl<L: Trace, R: Trace> Finalize for either::Either<L, R> {}
-
-    unsafe impl<L: Trace, R: Trace> Trace for either::Either<L, R> {
-        custom_trace!(this, mark, {
-            match this {
-                either::Either::Left(l) => mark(l),
-                either::Either::Right(r) => mark(r),
-            }
-        });
-    }
 }

@@ -1,4 +1,4 @@
-use boa_gc::Gc;
+use crate::gc::Gc;
 
 use super::*;
 use crate::ast::StmtKind;

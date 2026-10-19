@@ -1,6 +1,6 @@
 use std::any::TypeId;
 
-use crate::{GcBox, GcErasedPointer, Trace, Tracer};
+use crate::gc::{GcBox, GcErasedPointer, Trace, Tracer};
 
 // Workaround: https://users.rust-lang.org/t/custom-vtables-with-integers/78508
 pub(crate) const fn vtable_of<T: Trace + 'static>() -> &'static VTable {

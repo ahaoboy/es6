@@ -420,8 +420,8 @@ pub struct PromiseData {
 
 impl Finalize for JsFunction {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for JsFunction {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for JsFunction {
+    crate::gc::custom_trace!(this, mark, {
         mark(&this.data);
         if let Some(env) = &this.env {
             mark(env);
@@ -438,8 +438,8 @@ unsafe impl boa_gc::Trace for JsFunction {
 
 impl Finalize for BoundFunction {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for BoundFunction {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for BoundFunction {
+    crate::gc::custom_trace!(this, mark, {
         mark(&this.target);
         mark(&this.this);
         for argument in &this.arguments {
@@ -450,8 +450,8 @@ unsafe impl boa_gc::Trace for BoundFunction {
 
 impl Finalize for ArrayData {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for ArrayData {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for ArrayData {
+    crate::gc::custom_trace!(this, mark, {
         for value in this.items.iter().flatten() {
             mark(value);
         }
@@ -460,30 +460,30 @@ unsafe impl boa_gc::Trace for ArrayData {
 
 impl Finalize for ArrayBufferData {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for ArrayBufferData {
-    boa_gc::custom_trace!(this, mark, {});
+unsafe impl crate::gc::Trace for ArrayBufferData {
+    crate::gc::empty_trace!();
 }
 
 impl Finalize for DataViewData {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for DataViewData {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for DataViewData {
+    crate::gc::custom_trace!(this, mark, {
         mark(&this.buffer);
     });
 }
 
 impl Finalize for TypedArrayData {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for TypedArrayData {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for TypedArrayData {
+    crate::gc::custom_trace!(this, mark, {
         mark(&this.buffer);
     });
 }
 
 impl Finalize for GeneratorData {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for GeneratorData {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for GeneratorData {
+    crate::gc::custom_trace!(this, mark, {
         mark(&*this.function);
         mark(&this.this);
         for argument in &this.arguments {
@@ -495,8 +495,8 @@ unsafe impl boa_gc::Trace for GeneratorData {
 
 impl Finalize for GeneratorState {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for GeneratorState {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for GeneratorState {
+    crate::gc::custom_trace!(this, mark, {
         if let GeneratorState::SuspendedYield(frame) = this {
             mark(&**frame);
         }
@@ -505,8 +505,8 @@ unsafe impl boa_gc::Trace for GeneratorState {
 
 impl Finalize for PromiseReaction {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for PromiseReaction {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for PromiseReaction {
+    crate::gc::custom_trace!(this, mark, {
         if let Some(value) = &this.on_fulfilled {
             mark(value);
         }
@@ -521,8 +521,8 @@ unsafe impl boa_gc::Trace for PromiseReaction {
 
 impl Finalize for PromiseData {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for PromiseData {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for PromiseData {
+    crate::gc::custom_trace!(this, mark, {
         mark(&this.value);
         for reaction in &this.reactions {
             mark(reaction);
@@ -532,16 +532,16 @@ unsafe impl boa_gc::Trace for PromiseData {
 
 impl Finalize for MapKey {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for MapKey {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for MapKey {
+    crate::gc::custom_trace!(this, mark, {
         mark(&this.0);
     });
 }
 
 impl Finalize for ObjectKind {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for ObjectKind {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for ObjectKind {
+    crate::gc::custom_trace!(this, mark, {
         match this {
             ObjectKind::Array(data) => mark(data),
             ObjectKind::Function(function) => mark(&**function),

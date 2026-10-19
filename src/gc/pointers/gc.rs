@@ -1,4 +1,4 @@
-use crate::{
+use crate::gc::{
     Allocator, Ephemeron, GcErasedPointer, Tracer, WeakGc, custom_trace, finalizer_safe,
     internals::{EphemeronBox, GcBox, VTable},
     trace::{Finalize, Trace},
@@ -20,7 +20,7 @@ use std::{
 /// This can only happen if we are accessing a [`GcErasedPointer`] directly which is a bug.
 /// Panics if any of it's methods are called.
 ///
-/// Note: Accessing the [`crate::internals::GcHeader`] of [`GcErasedPointer`] is fine.
+/// Note: Accessing the [`crate::gc::internals::GcHeader`] of [`GcErasedPointer`] is fine.
 pub(crate) struct NonTraceable(());
 
 impl Finalize for NonTraceable {

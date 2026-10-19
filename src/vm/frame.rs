@@ -260,20 +260,20 @@ impl Frame {
     }
 }
 
-impl boa_gc::Finalize for Handler {}
+impl crate::gc::Finalize for Handler {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for Handler {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for Handler {
+    crate::gc::custom_trace!(this, mark, {
         if let Some(env) = &this.env {
             mark(env);
         }
     });
 }
 
-impl boa_gc::Finalize for Frame {}
+impl crate::gc::Finalize for Frame {}
 #[allow(unsafe_code)]
-unsafe impl boa_gc::Trace for Frame {
-    boa_gc::custom_trace!(this, mark, {
+unsafe impl crate::gc::Trace for Frame {
+    crate::gc::custom_trace!(this, mark, {
         if let Some(env) = &this.env {
             mark(env);
         }
