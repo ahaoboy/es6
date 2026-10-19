@@ -95,7 +95,8 @@ fat LTO with a single codegen unit.
 
 See [`docs/quickjs-oxide-port.md`](docs/quickjs-oxide-port.md) for the
 comparison with quickjs-oxide's register/8-byte-value core and the staged
-porting plan.
+porting plan, and [`docs/quickjs-oxide-commits.md`](docs/quickjs-oxide-commits.md)
+for the commit-by-commit ledger over `38e7ca3..main`.
 
 Additional hot-path work:
 
