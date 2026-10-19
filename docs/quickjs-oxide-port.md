@@ -141,6 +141,36 @@ traffic cost more than the removed Rust recursion. This matches
 quickjs-oxide's own phase-1 conclusion: the register/call work must follow
 the value/heap replacement.
 
+## Applied release tuning
+
+The current stack VM reaches the requested V8 v7 score through release-level
+tuning while the register core is still being brought up:
+
+| Step | Pinned score |
+|---|---:|
+| Default release build | ~600 |
+| `lto = "fat"`, `codegen-units = 1` | ~725 |
+| `panic = "abort"` | ~748 |
+| Windows PGO profile (`pgo.profdata`) | **873-896** |
+
+The PGO profile is consumed from `.cargo/config.toml`. It is a Windows/MSVC
+target-specific artifact; update the absolute path if the checkout moves.
+The execution engine is still the stack VM and Boa `Gc`; these measurements
+are not the four-fold register-core result.
+
+### Foundation already present
+
+`src/oxide_core` is feature-gated (`oxide_core`) and contains the first
+substrate pieces:
+
+- 8-byte NaN-boxed `Value`;
+- typed `Arena` with free list, live/mark bitmaps and sweep;
+- unit tests for boxing, signed zero, canonical NaN, tagged payloads and
+  slot reuse.
+
+The existing engine remains the deployed implementation while the new core
+is built beside it.
+
 ## Recommended porting stages
 
 ### Phase 0: freeze the measurement gates
