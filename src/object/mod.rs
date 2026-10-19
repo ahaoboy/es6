@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,7 +34,7 @@ pub struct Shape {
     pub id: u64,
     /// Slot order, which is also the property enumeration order.
     pub keys: Vec<PropKey>,
-    pub index: FxHashMap<PropKey, u32>,
+    pub index: OnceCell<FxHashMap<PropKey, u32>>,
 }
 
 static SHAPE_ID: AtomicU64 = AtomicU64::new(1);
@@ -47,7 +47,7 @@ thread_local! {
     static EMPTY_SHAPE: Rc<Shape> = Rc::new(Shape {
         id: 0,
         keys: Vec::new(),
-        index: FxHashMap::default(),
+        index: OnceCell::new(),
     });
     /// Shape transition interning, the equivalent of QuickJS' shape
     /// transition table. Objects built by the same code path converge on one
@@ -84,7 +84,7 @@ fn add_transition(parent: &Rc<Shape>, key: PropKey) -> Rc<Shape> {
         let mut shape = Shape {
             id: next_shape_id(),
             keys: Vec::with_capacity(parent.keys.len() + 1),
-            index: parent.index.clone(),
+            index: OnceCell::new(),
         };
         shape.keys.extend(parent.keys.iter().cloned());
         shape.grow(key.clone());
@@ -142,21 +142,46 @@ impl PropCache {
 impl Shape {
     #[inline(always)]
     pub fn slot(&self, key: &PropKey) -> Option<u32> {
-        self.index.get(key).copied()
+        // Small shapes are cheaper to scan than to index; the hash table is
+        // built lazily once the shape grows past the transition-sized case.
+        if self.keys.len() <= 8 {
+            return self
+                .keys
+                .iter()
+                .position(|candidate| candidate == key)
+                .map(|index| index as u32);
+        }
+        self.index
+            .get_or_init(|| {
+                let mut index = FxHashMap::with_capacity_and_hasher(
+                    self.keys.len(),
+                    FxBuildHasher,
+                );
+                for (slot, key) in self.keys.iter().enumerate() {
+                    index.insert(key.clone(), slot as u32);
+                }
+                index
+            })
+            .get(key)
+            .copied()
     }
 
     fn grow(&mut self, key: PropKey) -> u32 {
         let slot = self.keys.len() as u32;
         self.keys.push(key.clone());
-        self.index.insert(key, slot);
+        if let Some(index) = self.index.get_mut() {
+            index.insert(key, slot);
+        }
         slot
     }
 
     fn shrink(&mut self, slot: u32) {
         self.keys.remove(slot as usize);
-        self.index.clear();
-        for (index, key) in self.keys.iter().enumerate() {
-            self.index.insert(key.clone(), index as u32);
+        if let Some(index) = self.index.get_mut() {
+            index.clear();
+            for (slot, key) in self.keys.iter().enumerate() {
+                index.insert(key.clone(), slot as u32);
+            }
         }
     }
 }
@@ -173,7 +198,7 @@ impl LiteralTemplate {
         let mut shape = Shape {
             id: 0,
             keys: Vec::with_capacity(keys.len()),
-            index: FxHashMap::default(),
+            index: OnceCell::new(),
         };
         for key in keys {
             shape.grow(key.clone());
@@ -405,9 +430,16 @@ impl ObjectData {
     }
 
     pub fn ordinary(prototype: Option<ObjRef>) -> Self {
+        Self::ordinary_with_capacity(prototype, 0)
+    }
+
+    /// An ordinary object with room for the data properties a constructor
+    /// or empty literal is expected to add. Receiver sizing avoids
+    /// repeatedly growing `props` on `this.x = ...` sequences.
+    pub fn ordinary_with_capacity(prototype: Option<ObjRef>, capacity: usize) -> Self {
         Self {
             shape: empty_shape(),
-            props: Vec::new(),
+            props: Vec::with_capacity(capacity),
             prototype,
             kind: ObjectKind::Ordinary,
             extensible: true,

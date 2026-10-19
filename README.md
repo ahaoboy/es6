@@ -93,6 +93,10 @@ and property reads with inline caches. Strings are thin reference-counted
 values so every JS value stays at 16 bytes, and the release profile enables
 fat LTO with a single codegen unit.
 
+See [`docs/quickjs-oxide-port.md`](docs/quickjs-oxide-port.md) for the
+comparison with quickjs-oxide's register/8-byte-value core and the staged
+porting plan.
+
 Additional hot-path work:
 
 - One fused dispatch switch (the QuickJS `JS_CallInternal` shape) with the
