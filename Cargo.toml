@@ -11,8 +11,6 @@ modules = ["console", "fs", "os", "path", "timers"]
 intl = ["dep:icu_datetime", "dep:icu_locale", "dep:writeable", "dep:jiff"]
 # Experimental foundation for the staged register/8-byte-value core.
 oxide_core = []
-# Temporary interpreter opcode profiling.
-op_stats = []
 cli = ["dep:clap", "dep:miette"]
 console = []
 fs = []
@@ -47,3 +45,8 @@ const-str = "1.1.0"
 name = "es6"
 path = "src/main.rs"
 required-features = ["cli"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

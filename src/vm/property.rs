@@ -106,13 +106,18 @@ pub(crate) fn cached_get_const(
             let data = object_ref.borrow();
             let entry = cache.borrow();
             let shape = data.shape_id();
-            let slot = entry.poly_own(shape).or_else(|| {
-                (entry.valid && entry.own && entry.object_shape == shape).then_some(entry.index)
-            });
+            let slot = if let Some(slot) = entry.poly_own(shape) {
+                Some(slot)
+            } else if entry.valid && entry.own && entry.object_shape == shape {
+                Some(entry.index)
+            } else {
+                None
+            };
             if let Some(slot) = slot
                 && let Some(property) = data.props.get(slot as usize)
             {
-                if let Some(getter) = property.get.as_deref().cloned() {
+                if let Some(getter) = property.get.as_deref() {
+                    let getter = getter.clone();
                     drop(entry);
                     drop(data);
                     return call_value(realm, getter, object.clone(), &[]);
@@ -196,9 +201,13 @@ pub(crate) fn cached_set_const(
             let mut data = object_ref.borrow_mut();
             let entry = cache.borrow();
             let shape = data.shape_id();
-            let slot = entry.poly_own(shape).or_else(|| {
-                (entry.valid && entry.own && entry.object_shape == shape).then_some(entry.index)
-            });
+            let slot = if let Some(slot) = entry.poly_own(shape) {
+                Some(slot)
+            } else if entry.valid && entry.own && entry.object_shape == shape {
+                Some(entry.index)
+            } else {
+                None
+            };
             if let Some(slot) = slot
                 && let Some(property) = data.props.get_mut(slot as usize)
             {
@@ -286,7 +295,8 @@ pub(crate) fn cached_get_property(
                 }
             } else if entry.prototype_generation == crate::object::prototype_generation()
                 && data.prototype.as_ref().map(|proto| {
-                    proto.as_ref() as *const crate::gc::GcRefCell<crate::object::ObjectData> as usize
+                    proto.as_ref() as *const crate::gc::GcRefCell<crate::object::ObjectData>
+                        as usize
                 }) == entry.receiver_proto
             {
                 read_proto_holder(

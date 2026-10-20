@@ -14,6 +14,7 @@ mod iter;
 mod ops;
 mod property;
 
+use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -29,22 +30,18 @@ pub(crate) use frame::{RunOutcome, Step};
 pub use iter::iterable_items;
 pub use property::{get_value_property, set_value_property};
 
-#[cfg(feature = "op_stats")]
-pub fn dump_op_stats() {
-    ops::dump_op_stats();
-}
-
 pub use crate::coerce::{
     add_values, format_number, loose_equals, same_value, same_value_zero, strict_equals,
     to_boolean, to_int32, to_number, to_numeric, to_primitive, to_property_key, to_string,
     to_uint32,
 };
 
-/// Operand stack. Inline capacity covers typical expression depths, so most
-/// `push`/`pop` pairs never touch the heap (the QuickJS equivalent lives in
-/// the `JS_CallInternal` alloca, quickjs.c:18051).
+/// Operand stack. Pooled frames retain the allocation, so the hot `push`
+/// path is a plain `Vec` append; arguments keep a small inline buffer because
+/// they are allocated per call. The QuickJS equivalent lives in the
+/// `JS_CallInternal` alloca (quickjs.c:18051).
 pub(crate) type ValueStack = Vec<JsValue>;
-pub(crate) type ArgumentStack = Vec<JsValue>;
+pub(crate) type ArgumentStack = SmallVec<[JsValue; 4]>;
 
 /// A queued job. QuickJS stores the same entries in `JSContext.job_list` and
 /// dispatches them in `JS_ExecutePendingJob` (quickjs.c:2525).
@@ -83,12 +80,14 @@ thread_local! {
 
 const MAX_POOLED_FRAMES: usize = 512;
 
+#[inline(always)]
 fn take_frame(realm: &mut Realm) -> Option<Box<Frame>> {
     realm.frames.pop()
 }
 
 /// Return the frame to the pool, dropping every residual reference so pooled
 /// frames never pin reachable values.
+#[inline(always)]
 fn recycle_frame(realm: &mut Realm, mut frame: Box<Frame>) {
     if realm.frames.len() < MAX_POOLED_FRAMES {
         frame.clear();
@@ -178,8 +177,6 @@ fn run_loop(realm: &mut Realm, mut frame: Box<Frame>) -> JsResult<RunOutcome> {
         }
         let op = code[pc];
         pc += 1;
-        #[cfg(feature = "op_stats")]
-        ops::record_op(&op);
         let step = ops::execute_op(realm, &mut frame, &mut pc, op);
         match step {
             Ok(Step::Continue) => {}

@@ -1714,11 +1714,19 @@ impl Compiler {
     /// Emit a resolved local load, specializing depth-zero slots to the
     /// compact opcode used by the hot dispatch path.
     pub(super) fn emit_get(&mut self, depth: u16, slot: u16) {
-        self.emit(Op::GetVar { depth, slot });
+        if depth == 0 && slot & crate::bytecode::ENV_SLOT == 0 {
+            self.emit(Op::GetLocal(slot));
+        } else {
+            self.emit(Op::GetVar { depth, slot });
+        }
     }
 
     pub(super) fn emit_set(&mut self, depth: u16, slot: u16) {
-        self.emit(Op::SetVar { depth, slot });
+        if depth == 0 && slot & crate::bytecode::ENV_SLOT == 0 {
+            self.emit(Op::SetLocal(slot));
+        } else {
+            self.emit(Op::SetVar { depth, slot });
+        }
     }
 
     pub(super) fn emit_ident_load(&mut self, name: &str) {

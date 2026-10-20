@@ -91,7 +91,7 @@ impl Frame {
             global_this: false,
             callee: None,
             stack: ValueStack::with_capacity(32),
-            arguments: ArgumentStack::with_capacity(4),
+            arguments: ArgumentStack::new(),
             handlers: Vec::new(),
             pc: 0,
             completion: None,
@@ -101,6 +101,7 @@ impl Frame {
     /// Reset the flat frame and the optional environment for a fresh call.
     /// Pooled frames arrive empty (`recycle_frame` clears them), so only the
     /// root scope has to be materialized.
+    #[inline(always)]
     pub(crate) fn begin(&mut self, use_env: bool) {
         self.local_offset = 0;
         self.local_size = 0;

@@ -106,8 +106,6 @@ fn run() -> miette::Result<()> {
             .map_err(|error| Report::new(JsDiagnostic::new(error, &name, source.clone())))?;
         println!("{text}");
     }
-    #[cfg(feature = "op_stats")]
-    es6::vm::dump_op_stats();
     Ok(())
 }
 

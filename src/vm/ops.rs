@@ -1,4 +1,4 @@
-﻿//! Opcode dispatch and operand-stack helpers.
+//! Opcode dispatch and operand-stack helpers.
 //!
 //! This is the Rust counterpart of the giant switch in QuickJS
 //! `JS_CallInternal` (quickjs.c:18051); the fused operands mirror QuickJS'
@@ -23,48 +23,6 @@ use super::property::{
     get_element_value, get_value_property, pop_property_key, property_key_from_constant,
     set_element_value, set_value_property,
 };
-
-#[cfg(feature = "op_stats")]
-thread_local! {
-    static OP_STATS: std::cell::RefCell<
-        std::collections::HashMap<std::mem::Discriminant<Op>, (String, u64)>,
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-#[cfg(feature = "op_stats")]
-pub(crate) fn record_op(op: &Op) {
-    OP_STATS.with(|stats| {
-        let mut stats = stats.borrow_mut();
-        let entry = stats
-            .entry(std::mem::discriminant(op))
-            .or_insert_with(|| {
-                let text = format!("{op:?}");
-                let end = text.find(['(', '{']).unwrap_or(text.len());
-                (text[..end].to_string(), 0)
-            });
-        entry.1 += 1;
-    });
-}
-
-#[cfg(feature = "op_stats")]
-pub(crate) fn dump_op_stats() {
-    OP_STATS.with(|stats| {
-        let stats = stats.borrow();
-        let mut rows: Vec<_> = stats.values().collect();
-        rows.sort_unstable_by_key(|(_, count)| std::cmp::Reverse(*count));
-        let total: u64 = rows.iter().map(|(_, count)| *count).sum();
-        eprintln!("opcode samples: {total}");
-        eprintln!(
-            "Op size {} Step size {} JsValue size {}",
-            std::mem::size_of::<Op>(),
-            std::mem::size_of::<Step>(),
-            std::mem::size_of::<JsValue>()
-        );
-        for (name, count) in rows {
-            eprintln!("{count:12} {:5.2}% {name}", 100.0 * *count as f64 / total as f64);
-        }
-    });
-}
 
 /// Opcode dispatch. This is the Rust counterpart of the giant switch in
 /// QuickJS `JS_CallInternal` (quickjs.c:18051).
@@ -194,36 +152,72 @@ pub(crate) fn execute_op(
             cache,
         } => {
             let value = pop(&mut frame.stack)?;
-            let object = frame.get_var(depth, slot);
-            match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => super::property::cached_set_const(
-                    realm,
-                    &object,
-                    &frame.definition,
-                    key,
-                    &value,
-                    prop_cache,
-                )?,
-                None => {
-                    set_value_property(realm, &object, &PropKey::from(""), value.clone(), true)?
+            if let Some(object) = frame.get_var_ref(depth, slot) {
+                match frame.definition.prop_caches.get(cache as usize) {
+                    Some(prop_cache) => super::property::cached_set_const(
+                        realm,
+                        object,
+                        &frame.definition,
+                        key,
+                        &value,
+                        prop_cache,
+                    )?,
+                    None => {
+                        set_value_property(realm, object, &PropKey::from(""), value.clone(), true)?
+                    }
+                }
+            } else {
+                let object = frame.get_var(depth, slot);
+                match frame.definition.prop_caches.get(cache as usize) {
+                    Some(prop_cache) => super::property::cached_set_const(
+                        realm,
+                        &object,
+                        &frame.definition,
+                        key,
+                        &value,
+                        prop_cache,
+                    )?,
+                    None => {
+                        set_value_property(realm, &object, &PropKey::from(""), value.clone(), true)?
+                    }
                 }
             }
             frame.stack.push(value);
         }
         Op::SetThisPropConstKeep { key, cache } => {
             let value = pop(&mut frame.stack)?;
-            let object = frame.this_value(realm);
-            match frame.definition.prop_caches.get(cache as usize) {
-                Some(prop_cache) => super::property::cached_set_const(
-                    realm,
-                    &object,
-                    &frame.definition,
-                    key,
-                    &value,
-                    prop_cache,
-                )?,
-                None => {
-                    set_value_property(realm, &object, &PropKey::from(""), value.clone(), true)?
+            if frame.global_this {
+                let object = JsValue::Object(realm.global.clone());
+                match frame.definition.prop_caches.get(cache as usize) {
+                    Some(prop_cache) => super::property::cached_set_const(
+                        realm,
+                        &object,
+                        &frame.definition,
+                        key,
+                        &value,
+                        prop_cache,
+                    )?,
+                    None => {
+                        set_value_property(realm, &object, &PropKey::from(""), value.clone(), true)?
+                    }
+                }
+            } else {
+                match frame.definition.prop_caches.get(cache as usize) {
+                    Some(prop_cache) => super::property::cached_set_const(
+                        realm,
+                        &frame.this,
+                        &frame.definition,
+                        key,
+                        &value,
+                        prop_cache,
+                    )?,
+                    None => set_value_property(
+                        realm,
+                        &frame.this,
+                        &PropKey::from(""),
+                        value.clone(),
+                        true,
+                    )?,
                 }
             }
             frame.stack.push(value);
@@ -821,9 +815,7 @@ pub(crate) fn execute_op(
         } => {
             let left = frame.get_var(left_depth, left_slot);
             let right = frame.get_var(right_depth, right_slot);
-            frame
-                .stack
-                .push(binary_values(realm, left, right, op)?);
+            frame.stack.push(binary_values(realm, left, right, op)?);
         }
         Op::BinaryVarConst {
             op,
@@ -833,9 +825,7 @@ pub(crate) fn execute_op(
         } => {
             let left = frame.get_var(depth, slot);
             let right = constant_value(realm, &frame.definition, value, frame.env.as_ref())?;
-            frame
-                .stack
-                .push(binary_values(realm, left, right, op)?);
+            frame.stack.push(binary_values(realm, left, right, op)?);
         }
         Op::BinaryVar {
             op,
@@ -1556,16 +1546,15 @@ fn binary_values(
         BinaryKind::BitAnd => binary_int_values(realm, left, right, |a, b| a & b),
         BinaryKind::BitOr => binary_int_values(realm, left, right, |a, b| a | b),
         BinaryKind::BitXor => binary_int_values(realm, left, right, |a, b| a ^ b),
-        BinaryKind::Shl => binary_int_values(realm, left, right, |a, b| {
-            a.wrapping_shl((b & 31) as u32)
-        }),
-        BinaryKind::Shr => binary_int_values(realm, left, right, |a, b| {
-            a.wrapping_shr((b & 31) as u32)
-        }),
+        BinaryKind::Shl => {
+            binary_int_values(realm, left, right, |a, b| a.wrapping_shl((b & 31) as u32))
+        }
+        BinaryKind::Shr => {
+            binary_int_values(realm, left, right, |a, b| a.wrapping_shr((b & 31) as u32))
+        }
         BinaryKind::UShr => Ok(JsValue::number(
             (super::to_uint32(super::to_numeric(realm, left)?)
-                >> (super::to_uint32(super::to_numeric(realm, right)?) & 31))
-                as f64,
+                >> (super::to_uint32(super::to_numeric(realm, right)?) & 31)) as f64,
         )),
     }
 }
@@ -1799,9 +1788,10 @@ fn constant_value_slow(
             "InternalError: invalid string-array constant",
         )),
         Constant::Regex { source, flags } => {
-            let regex = regress::Regex::with_flags(source.as_ref(), flags.as_ref()).map_err(
-                |error| realm.syntax_error(format!("Invalid regular expression: {error}")),
-            )?;
+            let regex =
+                regress::Regex::with_flags(source.as_ref(), flags.as_ref()).map_err(|error| {
+                    realm.syntax_error(format!("Invalid regular expression: {error}"))
+                })?;
             let data = Rc::new(RegExpData {
                 source: source.to_string(),
                 flags: flags.to_string(),

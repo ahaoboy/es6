@@ -95,7 +95,7 @@ fn add_transition(parent: &Rc<Shape>, key: PropKey) -> Rc<Shape> {
 }
 
 impl PropCache {
-    #[inline]
+    #[inline(always)]
     pub fn poly_own(&self, shape: u64) -> Option<u32> {
         self.own_shapes[..self.own_count as usize]
             .iter()
@@ -119,7 +119,7 @@ impl PropCache {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn poly_proto(&self, shape: u64) -> bool {
         self.proto_shapes[..self.proto_count as usize].contains(&shape)
     }
